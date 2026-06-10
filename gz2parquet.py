@@ -29,6 +29,7 @@ INPUT_DIR            = r"data\raw"
 OUTPUT_DIR           = r"data\parquet"
 NEW_SAMPLING_RATE    = 15
 VISUALIZATION_PLOTS  = True
+TO_UTC               = 0     # hours to add to timestamps to convert to UTC (0 = already UTC)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -62,6 +63,10 @@ def read_csv_gz(path: Path, file_date: pd.Timestamp | None) -> pd.DataFrame:
     if nat_count:
         print(f"         Warning: {nat_count:,} rows with unparseable timestamps dropped")
         df = df.dropna(subset=["time_stamp"])
+
+    # shift timestamps to UTC
+    if TO_UTC != 0:
+        df["time_stamp"] = df["time_stamp"] + pd.Timedelta(hours=TO_UTC)
 
     # keep only rows within 00:00:00 to 23:59:59 of the reference day
     if file_date is not None:

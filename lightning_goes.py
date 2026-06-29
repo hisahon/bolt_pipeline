@@ -39,7 +39,7 @@ import requests
 from requests.adapters import HTTPAdapter, Retry
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-import netCDF4 as nc4
+# import netCDF4 as nc4
 
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────

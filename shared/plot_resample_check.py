@@ -105,11 +105,11 @@ def plot_pair(raw: pd.DataFrame, resampled: pd.DataFrame,
     ax_ts = fig.add_subplot(gs[0])
     raw_counts = raw.set_index("time_stamp").resample("1min").size()
     res_counts = resampled.set_index("time_stamp").resample("1min").size()
-    ax_ts.fill_between(raw_counts.index, raw_counts.values,
-                       alpha=0.35, color="#EF9F27", label="Original")
-    ax_ts.fill_between(res_counts.index, res_counts.values,
-                       alpha=0.65, color="#1D9E75",
-                       label=f"Resampled @{sampling_rate}s")
+    ax_ts.plot(raw_counts.index, raw_counts.values,
+               color="#EF9F27", linewidth=0.9, label="Original (1 min)")
+    ax_ts.plot(res_counts.index, res_counts.values,
+               color="#1D9E75", linewidth=0.9,
+               label=f"Resampled @{sampling_rate}s (1 min)")
     doy = raw["time_stamp"].dt.dayofyear.iloc[0]
     date = raw["time_stamp"].dt.date.iloc[0]
     ax_ts.set_title(f"{date} (DOY {doy}) — Strike count per minute — Resampled @{sampling_rate}s: {n_res:,} ({kept:.1f}% kept)")
@@ -169,7 +169,7 @@ if __name__ == "__main__":
 
     # ── STANDALONE CONFIG — only used when running this file directly ─────────
     INPUT_DIR         = r"data\raw"
-    OUTPUT_DIR        = r"data\parquet"
+    OUTPUT_DIR        = r"data\parquet_15s"
     NEW_SAMPLING_RATE = 15
     MAX_FILES         = 3
     # ─────────────────────────────────────────────────────────────────────────

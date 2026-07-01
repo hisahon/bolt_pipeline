@@ -39,6 +39,7 @@ Wavelet parameters (match f2_spec.py exactly)
 """
 
 from pathlib import Path
+import re
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -74,11 +75,14 @@ PARQUET_DIR   = r"data\parquet_15s"
 SAMPLING_RATE = 15          # seconds — must match ingest_lightning
 SCATTER_ALPHA = 0.25
 SCATTER_SIZE  = 1
-CMAP          = "plasma"
+CMAP          = "rainbow"
 
 # domain bounding box — data outside this is discarded at load time
 LON_MIN, LON_MAX = -68, -50
 LAT_MIN, LAT_MAX = -35, -20
+
+# time range — full day
+HOUR_MIN, HOUR_MAX = 0, 24
 
 # wavelet — exact parameters from f2_spec.py
 WAV_DT    = 0.25    # time unit = hours; 15-min bins → dt = 0.25 h
@@ -96,9 +100,9 @@ DETREND_WIN = 20
 
 
 # ── colours ───────────────────────────────────────────────────────────────────
-BG_DARK  = "#1A1A2E"
-BG_PANEL = "#0D0D1A"
-C_ACCENT = "#444466"
+BG_DARK  = "#F5F5F5"
+BG_PANEL = "#FFFFFF"
+C_ACCENT = "#AAAAAA"
 C_REGION = "#E05C5C"
 C_FULL   = "#1D9E75"
 
@@ -148,32 +152,39 @@ def _compute_wavelet(lfr_values: np.ndarray):
     power = (power - power.min()) / (power.max() + 1e-30)
     power = np.log10(power + 5e-2)
 
-    # x-axis: same as tms_bc / 24 in f2_spec.py
+    # x-axis: each sample is SAMPLING_RATE seconds
+    # express as fraction of day so tms_num = date2num(t_start) + tms_day
     n       = lfr_values.shape[0]
-    tms_raw = np.arange(n) * WAV_DT   # sample * dt
-    tms_day = tms_raw / 24.0           # fraction of day
+    tms_day = np.arange(n) * SAMPLING_RATE / 86400.0   # seconds → fraction of day
 
     return tms_day, freq, power
+
+
+def _parse_date(stem: str):
+    """Extract year and DOY from filename, e.g. lx_raw_ROGER_20220407_entln_15s → 2022, 97."""
+    match = re.search(r"(\d{8})", stem)
+    if match:
+        dt = pd.to_datetime(match.group(1), format="%Y%m%d")
+        return dt.year, dt.day_of_year
+    return None, None
 
 
 def _load(path: Path) -> pd.DataFrame:
     df = pd.read_parquet(path)
     df["time_stamp"] = pd.to_datetime(df["time_stamp"])
-    # apply domain bounding box
+    # apply spatial bounding box only — hour filter is applied at plot time
     df = df[
         (df["longitude"] >= LON_MIN) & (df["longitude"] <= LON_MAX) &
         (df["latitude"]  >= LAT_MIN) & (df["latitude"]  <= LAT_MAX)
-    ].reset_index(drop=True)
-    return df
+    ]
+    return df.reset_index(drop=True)
 
 
-def _lfr_15s(df: pd.DataFrame, day_start: pd.Timestamp) -> pd.Series:
-    """LFR at native 15s resolution for the LFR line plot."""
-    full_idx = pd.date_range(
-        start=day_start,
-        end=day_start + pd.Timedelta(hours=24) - pd.Timedelta(seconds=SAMPLING_RATE),
-        freq=f"{SAMPLING_RATE}s",
-    )
+def _lfr_15s(df: pd.DataFrame, day_start: pd.Timestamp, hmin=HOUR_MIN, hmax=HOUR_MAX) -> pd.Series:
+    """LFR at native 15s resolution, covering only the hmin–hmax window."""
+    t_start = day_start + pd.Timedelta(hours=hmin)
+    t_end   = day_start + pd.Timedelta(hours=hmax) - pd.Timedelta(seconds=SAMPLING_RATE)
+    full_idx = pd.date_range(start=t_start, end=t_end, freq=f"{SAMPLING_RATE}s")
     lfr = (
         df.groupby("time_stamp")
           .size()
@@ -191,15 +202,21 @@ def _filter_region(df, lon0, lon1, lat0, lat1):
     return df[mask]
 
 
+def _filter_hours(df, hmin, hmax):
+    """Keep only rows within [hmin, hmax)."""
+    hour = df["time_stamp"].dt.hour + df["time_stamp"].dt.minute / 60
+    return df[(hour >= hmin) & (hour < hmax)]
+
+
 # ── plot helpers ──────────────────────────────────────────────────────────────
 def _style_ax(ax):
     ax.set_facecolor(BG_PANEL)
-    ax.tick_params(colors="white", labelsize=8)
+    ax.tick_params(colors="black", labelsize=8)
     for spine in ax.spines.values():
         spine.set_edgecolor(C_ACCENT)
-    ax.xaxis.label.set_color("white")
-    ax.yaxis.label.set_color("white")
-    ax.title.set_color("white")
+    ax.xaxis.label.set_color("black")
+    ax.yaxis.label.set_color("black")
+    ax.title.set_color("black")
 
 
 def _colored_lfr_line(ax, lfr: pd.Series, norm: Normalize, cmap):
@@ -229,6 +246,8 @@ class LFRExplorer:
         self._df    = None
         self._norm  = Normalize(vmin=0, vmax=24)
         self._cmap  = matplotlib.colormaps[CMAP]
+        self._hmin  = HOUR_MIN
+        self._hmax  = HOUR_MAX
 
         self._build_figure()
         self._load_day(0)
@@ -258,10 +277,10 @@ class LFRExplorer:
             ax.axis("off")
 
         self.ax_title = ax_title
-        self.btn_prev = Button(ax_prev, "◀  Prev", color="#2A2A4A", hovercolor="#3A3A6A")
-        self.btn_next = Button(ax_next, "Next  ▶", color="#2A2A4A", hovercolor="#3A3A6A")
-        self.btn_prev.label.set_color("white")
-        self.btn_next.label.set_color("white")
+        self.btn_prev = Button(ax_prev, "◀  Prev", color="#DDDDDD", hovercolor="#BBBBBB")
+        self.btn_next = Button(ax_next, "Next  ▶", color="#DDDDDD", hovercolor="#BBBBBB")
+        self.btn_prev.label.set_color("black")
+        self.btn_next.label.set_color("black")
         self.btn_prev.on_clicked(self._on_prev)
         self.btn_next.on_clicked(self._on_next)
 
@@ -301,8 +320,8 @@ class LFRExplorer:
 
         # ── reset button ──────────────────────────────────────────────────────
         ax_reset = self.fig.add_axes([0.88, 0.01, 0.10, 0.030])
-        self.btn_reset = Button(ax_reset, "Reset region", color="#2A2A4A", hovercolor="#3A3A6A")
-        self.btn_reset.label.set_color("white")
+        self.btn_reset = Button(ax_reset, "Reset region", color="#DDDDDD", hovercolor="#BBBBBB")
+        self.btn_reset.label.set_color("black")
         self.btn_reset.label.set_fontsize(8)
         self.btn_reset.on_clicked(self._on_reset)
 
@@ -320,9 +339,9 @@ class LFRExplorer:
             ScalarMappable(norm=self._norm, cmap=self._cmap),
             cax=self.ax_cbar, orientation="horizontal",
         )
-        cb.set_label("Hour of day (UTC)", color="white", fontsize=8)
+        cb.set_label("Hour of day (UTC)", color="black", fontsize=8)
         cb.set_ticks(range(0, 25, 3))
-        cb.ax.tick_params(colors="white", labelsize=7)
+        cb.ax.tick_params(colors="black", labelsize=7)
         cb.outline.set_edgecolor(C_ACCENT)
 
         self.fig.canvas.mpl_connect("key_press_event", self._on_key)
@@ -347,7 +366,7 @@ class LFRExplorer:
         self.ax_map.set_facecolor(BG_PANEL)
         self.ax_map.set_aspect("equal", adjustable="box")
 
-        df       = self._df
+        df       = _filter_hours(self._df, self._hmin, self._hmax)
         hour_dec = df["time_stamp"].dt.hour + df["time_stamp"].dt.minute / 60
 
         self.ax_map.scatter(
@@ -369,17 +388,17 @@ class LFRExplorer:
             self.ax_map.set_title(
                 f"lon [{lon0:.2f}, {lon1:.2f}]  lat [{lat0:.2f}, {lat1:.2f}]"
                 f"  —  {n:,} flashes",
-                color="white", fontsize=9,
+                color="black", fontsize=9,
             )
         else:
             self.ax_map.set_title(
                 f"{len(df):,} flashes  —  draw a rectangle to select a region",
-                color="white", fontsize=9,
+                color="black", fontsize=9,
             )
 
-        self.ax_map.set_xlabel("Longitude", color="white")
-        self.ax_map.set_ylabel("Latitude",  color="white")
-        self.ax_map.tick_params(colors="white", labelsize=8)
+        self.ax_map.set_xlabel("Longitude", color="black")
+        self.ax_map.set_ylabel("Latitude",  color="black")
+        self.ax_map.tick_params(colors="black", labelsize=8)
         for spine in self.ax_map.spines.values():
             spine.set_edgecolor(C_ACCENT)
 
@@ -389,7 +408,7 @@ class LFRExplorer:
         self.ax_lfr.cla()
         _style_ax(self.ax_lfr)
 
-        df = self._df
+        df = _filter_hours(self._df, self._hmin, self._hmax)
         if self.region is not None:
             lon0, lon1, lat0, lat1 = self.region
             df = _filter_region(df, lon0, lon1, lat0, lat1)
@@ -398,38 +417,39 @@ class LFRExplorer:
             self.ax_lfr.text(
                 0.5, 0.5, "No flashes in selected region",
                 transform=self.ax_lfr.transAxes,
-                ha="center", va="center", color="white", fontsize=10,
+                ha="center", va="center", color="black", fontsize=10,
             )
             return
 
         day_start = self._df["time_stamp"].dt.normalize().iloc[0]
-        day_end   = day_start + pd.Timedelta(hours=24)
-        lfr       = _lfr_15s(df, day_start)
+        t_start   = day_start + pd.Timedelta(hours=self._hmin)
+        t_end     = day_start + pd.Timedelta(hours=self._hmax)
+        lfr       = _lfr_15s(df, day_start, self._hmin, self._hmax)
 
         _colored_lfr_line(self.ax_lfr, lfr, self._norm, self._cmap)
 
         self.ax_lfr.set_xlim(
-            mdates.date2num(day_start.to_pydatetime()),
-            mdates.date2num(day_end.to_pydatetime()),
+            mdates.date2num(t_start.to_pydatetime()),
+            mdates.date2num(t_end.to_pydatetime()),
         )
         self.ax_lfr.set_ylim(bottom=0)
 
         label = "Region LFR" if self.region is not None else f"Full domain LFR ({SAMPLING_RATE}s)"
-        self.ax_lfr.set_title(label, color="white", fontsize=9)
-        self.ax_lfr.set_ylabel("LFR  (flashes / s)", color="white")
-        self.ax_lfr.set_xlabel("Hour (UTC)", color="white")
+        self.ax_lfr.set_title(label, color="black", fontsize=9)
+        self.ax_lfr.set_ylabel("LFR  (flashes / s)", color="black")
+        self.ax_lfr.set_xlabel("Hour (UTC)", color="black")
 
         self.ax_lfr.xaxis.set_major_locator(mdates.HourLocator(byhour=range(0, 24, 3)))
         self.ax_lfr.xaxis.set_minor_locator(mdates.HourLocator(byhour=range(0, 24, 1)))
         self.ax_lfr.xaxis.set_major_formatter(mdates.DateFormatter("%H"))
-        self.ax_lfr.grid(axis="y", linestyle="--", linewidth=0.4, alpha=0.3, color="white")
-        self.ax_lfr.grid(axis="x", linestyle=":",  linewidth=0.3, alpha=0.25, color="white")
+        self.ax_lfr.grid(axis="y", linestyle="--", linewidth=0.4, alpha=0.3, color="gray")
+        self.ax_lfr.grid(axis="x", linestyle=":",  linewidth=0.3, alpha=0.25, color="gray")
 
     def _draw_wavelet(self):
         self.ax_spec.cla()
         _style_ax(self.ax_spec)
 
-        df = self._df
+        df = _filter_hours(self._df, self._hmin, self._hmax)
         if self.region is not None:
             lon0, lon1, lat0, lat1 = self.region
             df = _filter_region(df, lon0, lon1, lat0, lat1)
@@ -438,14 +458,14 @@ class LFRExplorer:
             self.ax_spec.text(
                 0.5, 0.5, "No flashes in selected region",
                 transform=self.ax_spec.transAxes,
-                ha="center", va="center", color="white", fontsize=9,
+                ha="center", va="center", color="black", fontsize=9,
             )
             self.ax_spec.set_xticks([])
             self.ax_spec.set_yticks([])
             return
 
         day_start = self._df["time_stamp"].dt.normalize().iloc[0]
-        lfr_vals  = _lfr_15s(df, day_start).values   # native 15s, same as f2_spec.py
+        lfr_vals  = _lfr_15s(df, day_start, self._hmin, self._hmax).values   # native 15s, same as f2_spec.py
 
         result = _compute_wavelet(lfr_vals)
 
@@ -453,7 +473,7 @@ class LFRExplorer:
             self.ax_spec.text(
                 0.5, 0.5, "Insufficient data for wavelet",
                 transform=self.ax_spec.transAxes,
-                ha="center", va="center", color="white", fontsize=9,
+                ha="center", va="center", color="black", fontsize=9,
             )
             self.ax_spec.set_xticks([])
             self.ax_spec.set_yticks([])
@@ -461,38 +481,50 @@ class LFRExplorer:
 
         tms_day, freq, power = result
 
+        # convert fraction-of-day to matplotlib date numbers for alignment with LFR
+        day_start = self._df["time_stamp"].dt.normalize().iloc[0]
+        t_start   = day_start + pd.Timedelta(hours=self._hmin)
+        t_end     = day_start + pd.Timedelta(hours=self._hmax)
+        tms_num   = (mdates.date2num(t_start.to_pydatetime())
+                     + tms_day)   # tms_day in [0,1] = fraction of window
+
         # contourf — identical to f2_spec.py
         cf = self.ax_spec.contourf(
-            tms_day, freq, power,
+            tms_num, freq, power,
             cmap="nipy_spectral", levels=20,
         )
 
-        # x-axis: tms_day is fraction of day (0..1), show integer hours
-        hour_ticks = np.arange(0, 25, 3) / 24.0
-        self.ax_spec.set_xticks(hour_ticks)
-        self.ax_spec.set_xticklabels([str(h) for h in range(0, 25, 3)])
-        self.ax_spec.set_xlim(tms_day[0], tms_day[-1])
+        # x-axis aligned with LFR panel
+        self.ax_spec.set_xlim(
+            mdates.date2num(t_start.to_pydatetime()),
+            mdates.date2num(t_end.to_pydatetime()),
+        )
+        self.ax_spec.xaxis.set_major_locator(mdates.HourLocator(byhour=range(0, 24, 3)))
+        self.ax_spec.xaxis.set_minor_locator(mdates.HourLocator(byhour=range(0, 24, 1)))
+        self.ax_spec.xaxis.set_major_formatter(mdates.DateFormatter("%H"))
 
-        self.ax_spec.set_xlabel("Hour (UTC)", color="white")
-        self.ax_spec.set_ylabel("Frequency (mHz)", color="white")
+        self.ax_spec.set_xlabel("Hour (UTC)", color="black")
+        self.ax_spec.set_ylabel("Frequency (mHz)", color="black")
         self.ax_spec.set_title(
             "Wavelet power — LFR  (Morlet, 2–10 mHz)",
-            color="white", fontsize=9,
+            color="black", fontsize=9,
         )
-        self.ax_spec.grid(axis="x", linestyle=":", linewidth=0.3, alpha=0.25, color="white")
+        self.ax_spec.grid(axis="x", linestyle=":", linewidth=0.3, alpha=0.25, color="gray")
 
     def _update_title(self):
         self.ax_title.cla()
         self.ax_title.axis("off")
         stem  = self.files[self.idx].stem
+        year, doy = _parse_date(stem)
         n     = self.idx + 1
         total = len(self.files)
+        date_str = f"Year {year}  —  DOY {doy}" if year else stem
         self.ax_title.text(
             0.5, 0.5,
-            f"{stem}   [{n} / {total}]",
+            f"{date_str}   [{n} / {total}]",
             transform=self.ax_title.transAxes,
             ha="center", va="center",
-            color="white", fontsize=11, fontweight="bold",
+            color="black", fontsize=11, fontweight="bold",
         )
 
     # ── callbacks ─────────────────────────────────────────────────────────────
@@ -525,6 +557,7 @@ class LFRExplorer:
         elif event.key in ("r", "R"):
             self.region = None
             self._redraw()
+
 
 
 # ── entry point ───────────────────────────────────────────────────────────────

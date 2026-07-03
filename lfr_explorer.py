@@ -82,7 +82,7 @@ LON_MIN, LON_MAX = -68, -50
 LAT_MIN, LAT_MAX = -35, -20
 
 # time range — full day
-HOUR_MIN, HOUR_MAX = 0, 24
+HOUR_MIN, HOUR_MAX = 15, 22
 
 # wavelet — exact parameters from f2_spec.py
 WAV_DT    = 0.25    # time unit = hours; 15-min bins → dt = 0.25 h

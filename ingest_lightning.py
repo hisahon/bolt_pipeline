@@ -59,7 +59,7 @@ def read_csv_gz(path: Path, file_date: pd.Timestamp | None) -> pd.DataFrame:
         df = pd.read_csv(f, dtype=DTYPE_MAP, usecols=KEEP_COLUMNS)
 
     df["time_stamp"] = pd.to_datetime(
-        df["time_stamp"], format="%Y-%m-%d %H:%M:%S.%f", errors="coerce"
+        df["time_stamp"], format="mixed", errors="coerce"
     )
 
     nat_count = df["time_stamp"].isna().sum()
@@ -67,9 +67,7 @@ def read_csv_gz(path: Path, file_date: pd.Timestamp | None) -> pd.DataFrame:
         print(f"         Warning: {nat_count:,} rows with unparseable timestamps dropped")
         df = df.dropna(subset=["time_stamp"])
 
-    # shift timestamps to UTC
-    if TO_UTC != 0:
-        df["time_stamp"] = df["time_stamp"] + pd.Timedelta(hours=TO_UTC)
+    df["time_stamp"] = df["time_stamp"].dt.tz_localize(None)
 
     # keep only rows within [00:00:00.000, 00:00:00.000 of next day)
     # using exclusive upper bound so milliseconds up to 23:59:59.999 are preserved

@@ -117,6 +117,13 @@ def plot_lfr(resampled: pd.DataFrame,
     ax.legend(loc="upper right")
     ax.grid(axis="y", linestyle="--", linewidth=0.5, alpha=0.5)
     ax.grid(axis="x", linestyle=":", linewidth=0.4, alpha=0.4)
+    
+    fig.text(0.9, -0.01, 'Script: bolt-pipeline/shared/plot_lfr.py\nFunction: plot_lfr\nStorage: bolt_pipeline/data/images', 
+             horizontalalignment='right', 
+             verticalalignment='bottom', 
+             fontsize=10, 
+             color='red', 
+             alpha=0.7)
 
     fig.tight_layout()
 

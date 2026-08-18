@@ -28,17 +28,19 @@ mpl.rcParams["ytick.labelsize"] = 9
 
 import os
 import re
+import inspect
 from pathlib import Path
 from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.ticker as mticker
 import requests
 from requests.adapters import HTTPAdapter, Retry
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
 # import netCDF4 as nc4
 
 
@@ -51,7 +53,69 @@ CHANNEL           = 13
 GOES_TIMEOUT      = 30.0
 CMAP_GOES         = "Blues_r"
 VMIN_TEMP         = -80       # °C
-VMAX_TEMP         = 30      # °C
+VMAX_TEMP         = 0      # °C
+
+# ── seleção de data ────────────────────────────────────────────────────────
+# TARGET_DATE : processa apenas um dia específico. Formato 'YYYYMMDD' ou None.
+# DATE_RANGE  : processa um intervalo (início, fim), ambos 'YYYYMMDD'. Ignorado
+#               se TARGET_DATE estiver definido. Use None para desativar.
+# Se os dois forem None, processa todos os parquet encontrados (comportamento original).
+TARGET_DATE       = "20260722"                       # ex: "20250115"
+DATE_RANGE        = None                       # ex: ("20250110", "20250120")
+
+# ── mapa (cartopy) ─────────────────────────────────────────────────────────
+SHOW_STATES       = True      # desenha fronteiras estaduais (admin_1)
+SHOW_COUNTRIES    = True      # desenha fronteiras de países
+SHOW_COASTLINE    = True      # desenha linha de costa
+MAP_RESOLUTION    = "50m"     # '110m' (rápido/grosseiro), '50m' (equilíbrio), '10m' (detalhado/lento)
+STATE_LINEWIDTH   = 0.6
+STATE_COLOR       = "dimgray"
+BORDER_LINEWIDTH  = 0.8
+BORDER_COLOR      = "black"
+
+# ── recorte espacial (ROI) ────────────────────────────────────────────────
+# Limita a imagem GOES e os raios a uma sub-região, em vez do domínio inteiro
+# baixado. Defina CROP_TO_ROI = False para voltar a usar a extensão completa.
+CROP_TO_ROI       = True
+ROI_LAT_MIN       = -40
+ROI_LAT_MAX       = -10
+ROI_LON_MIN       = -70
+ROI_LON_MAX       = -40
+
+# ── raios (aparência) ──────────────────────────────────────────────────────
+# 'scatter' : um ponto por raio (rápido de entender, mas alpha satura e some
+#             a diferença entre áreas com muitos e poucos raios).
+# 'density' : agrupa os raios em uma grade hexagonal (hexbin) e usa COR para
+#             indicar contagem por célula — melhor pra enxergar densidade,
+#             e mais leve pra desenhar quando há muitos pontos (raw/µs).
+STRIKE_DISPLAY_MODE = "density"    # "scatter" ou "density"
+
+# usados apenas se STRIKE_DISPLAY_MODE == "scatter"
+STRIKE_SIZE       = 4
+STRIKE_ALPHA      = 0.15
+STRIKE_COLOR      = "red"
+
+# usados apenas se STRIKE_DISPLAY_MODE == "density"
+# HEXBIN_GRIDSIZE:
+#   "auto" → lê a resolução nativa (espaçamento de pixel) do próprio arquivo
+#            GOES lido e usa HEXBIN_RESOLUTION_FACTOR para escalar o número
+#            de células a partir dela.
+#   int    → número fixo de hexágonos no eixo x (comportamento manual antigo).
+HEXBIN_GRIDSIZE          = "auto"
+HEXBIN_RESOLUTION_FACTOR = 0.5   # 1.0 = mesma resolução do GOES; 0.5 = metade
+                                  # da resolução (células com o dobro do tamanho
+                                  # do pixel do GOES); 2.0 = o dobro da resolução.
+HEXBIN_CMAP       = "autumn"   # contraste bom sobre o CMAP_GOES (Blues_r)
+HEXBIN_MINCOUNT   = 1         # células com menos raios que isso ficam transparentes
+HEXBIN_ALPHA      = 0.85
+
+# Escala de cor fixa (mesmos limites em todos os frames, pra poder comparar
+# densidade entre imagens diferentes). Deixe None em qualquer um dos dois
+# para que o matplotlib normalize automaticamente por frame (comportamento
+# padrão, mas cada PNG fica em uma escala diferente).
+HEXBIN_VMIN       = 0        # nº mínimo de raios por célula (cor mais fraca)
+HEXBIN_VMAX       = 70       # nº máximo de raios por célula (cor mais forte);
+                              # células acima disso saturam na cor de topo do cmap
 # ─────────────────────────────────────────────────────────────────────────────
 
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -59,6 +123,36 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 PARQUET_DIR  = Path(PARQUET_DIR)
 GOES_TMP_DIR = Path(GOES_TMP_DIR)
 IMAGE_DIR    = Path(IMAGE_DIR)
+
+
+# ── proveniência automática (script / função / storage) ───────────────────────
+def add_provenance_footer(fig, storage_path, x=0.9, y=0.01, **kwargs):
+    """
+    Adiciona rodapé com Script / Function / Storage no rodapé da figura,
+    descobrindo automaticamente (via inspect) o arquivo e a função que
+    chamaram esta rotina — evita rodapés dessincronizados ao copiar/colar
+    entre scripts.
+    """
+    caller = inspect.stack()[1]
+    script_name   = os.path.relpath(caller.filename)
+    function_name = caller.function
+
+    text = (
+        f"Script: {script_name}\n"
+        f"Function: {function_name}\n"
+        f"Storage: {storage_path}"
+    )
+
+    defaults = dict(
+        horizontalalignment='right',
+        verticalalignment='bottom',
+        fontsize=10,
+        color='black',
+        alpha=0.7,
+    )
+    defaults.update(kwargs)
+
+    fig.text(x, y, text, **defaults)
 
 
 # ── satellite selection ───────────────────────────────────────────────────────
@@ -145,41 +239,172 @@ def _read_nc(nc_path: Path) -> tuple:
     return temp, lats, lons
 
 
+# ── recorte espacial (ROI) ─────────────────────────────────────────────────
+def _crop_to_roi(temp: np.ndarray, lat: np.ndarray, lon: np.ndarray) -> tuple:
+    """
+    Recorta os arrays de temperatura/lat/lon para a janela definida em
+    ROI_LAT_MIN/MAX e ROI_LON_MIN/MAX. Assume grade regular (lat e lon 1D),
+    como fornecida pela pasta 'retangular' da CPTEC.
+    """
+    if not CROP_TO_ROI:
+        return temp, lat, lon
 
-# ── map plot ──────────────────────────────────────────────────────────────────
+    lat_mask = (lat >= ROI_LAT_MIN) & (lat <= ROI_LAT_MAX)
+    lon_mask = (lon >= ROI_LON_MIN) & (lon <= ROI_LON_MAX)
+
+    if not lat_mask.any() or not lon_mask.any():
+        print("   [WARN] ROI fora da área coberta pelo arquivo GOES — usando extensão completa")
+        return temp, lat, lon
+
+    temp_cropped = temp[np.ix_(lat_mask, lon_mask)]
+    return temp_cropped, lat[lat_mask], lon[lon_mask]
+
+
+# ── resolução nativa do GOES (a partir do próprio arquivo) ─────────────────
+_last_printed_resolution = None  # evita spam de print a cada frame
+
+
+def _infer_goes_resolution(lat: np.ndarray, lon: np.ndarray) -> tuple:
+    """
+    Calcula o espaçamento (em graus) entre pixels consecutivos de lat/lon,
+    lido diretamente do arquivo GOES já aberto (não é um valor fixo/chutado).
+    Usa a mediana das diferenças pra ser robusto a eventuais falhas pontuais
+    na grade.
+    """
+    lat_res = float(np.median(np.abs(np.diff(lat)))) if len(lat) > 1 else None
+    lon_res = float(np.median(np.abs(np.diff(lon)))) if len(lon) > 1 else None
+    return lat_res, lon_res
+
+
+def _hexbin_gridsize_from_resolution(lat, lon, lon_min, lon_max, lat_min, lat_max):
+    """
+    Traduz a resolução nativa do GOES (graus/pixel) em um gridsize (nx, ny)
+    para o hexbin, de forma que cada célula de densidade corresponda
+    aproximadamente a um pixel do satélite dentro do ROI plotado.
+    """
+    global _last_printed_resolution
+
+    lat_res, lon_res = _infer_goes_resolution(lat, lon)
+    if not lat_res or not lon_res:
+        return 60  # fallback se a grade tiver 1 único ponto por eixo
+
+    # fator < 1 → células maiores que o pixel do GOES (grade mais grossa)
+    # fator > 1 → células menores que o pixel do GOES (grade mais fina)
+    lat_res_scaled = lat_res / HEXBIN_RESOLUTION_FACTOR
+    lon_res_scaled = lon_res / HEXBIN_RESOLUTION_FACTOR
+
+    nx = max(1, round((lon_max - lon_min) / lon_res_scaled))
+    ny = max(1, round((lat_max - lat_min) / lat_res_scaled))
+
+    resolution_key = (round(lat_res, 5), round(lon_res, 5), HEXBIN_RESOLUTION_FACTOR)
+    if resolution_key != _last_printed_resolution:
+        print(f"   Resolução nativa GOES detectada: ~{lat_res:.4f}° lat × {lon_res:.4f}° lon "
+              f"(fator {HEXBIN_RESOLUTION_FACTOR}) → hexbin gridsize=({nx}, {ny})")
+        _last_printed_resolution = resolution_key
+
+    return (nx, ny)
+
+
+
+# ── map plot (cartopy) ──────────────────────────────────────────────────────
 def plot_goes_lightning(goes_dt, temp, lat, lon, lightning, out_path):
-    lon_min, lon_max = float(lon.min()), float(lon.max())
-    lat_min, lat_max = float(lat.min()), float(lat.max())
+    if CROP_TO_ROI:
+        lon_min, lon_max = ROI_LON_MIN, ROI_LON_MAX
+        lat_min, lat_max = ROI_LAT_MIN, ROI_LAT_MAX
+    else:
+        lon_min, lon_max = float(lon.min()), float(lon.max())
+        lat_min, lat_max = float(lat.min()), float(lat.max())
 
-    fig, ax = plt.subplots(figsize=(10, 9))
+    proj = ccrs.PlateCarree()
+    fig = plt.figure(figsize=(10, 9))
+    ax = plt.axes(projection=proj)
+    ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=proj)
 
     im = ax.imshow(
         temp,
         origin="lower",
         extent=[lon_min, lon_max, lat_min, lat_max],
+        transform=proj,
         cmap=CMAP_GOES,
         vmin=VMIN_TEMP,
         vmax=VMAX_TEMP,
-        aspect="auto",
         interpolation="nearest",
+        zorder=1,
     )
-    cbar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.03)
     cbar.set_label("Brightness temperature (°C)")
 
-    if not lightning.empty:
-        ax.scatter(
-            lightning["longitude"], lightning["latitude"],
-            s=1, color="red", alpha=0.6,
-            linewidths=0, rasterized=True, zorder=3,
+    # ── feições geográficas ────────────────────────────────────────────────
+    if SHOW_COASTLINE:
+        ax.add_feature(
+            cfeature.NaturalEarthFeature(
+                "physical", "coastline", MAP_RESOLUTION,
+                facecolor="none",
+            ),
+            edgecolor=BORDER_COLOR, linewidth=BORDER_LINEWIDTH, zorder=2,
         )
 
-    ax.set_xlim(lon_min, lon_max)
-    ax.set_ylim(lat_min, lat_max)
-    ax.set_xlabel("Longitude")
-    ax.set_ylabel("Latitude")
-    ax.xaxis.set_major_locator(mticker.MultipleLocator(10))
-    ax.yaxis.set_major_locator(mticker.MultipleLocator(10))
-    ax.grid(True, linestyle="--", linewidth=0.4, alpha=0.5)
+    if SHOW_COUNTRIES:
+        ax.add_feature(
+            cfeature.NaturalEarthFeature(
+                "cultural", "admin_0_boundary_lines_land", MAP_RESOLUTION,
+                facecolor="none",
+            ),
+            edgecolor=BORDER_COLOR, linewidth=BORDER_LINEWIDTH, zorder=2,
+        )
+
+    if SHOW_STATES:
+        ax.add_feature(
+            cfeature.NaturalEarthFeature(
+                "cultural", "admin_1_states_provinces_lines", MAP_RESOLUTION,
+                facecolor="none",
+            ),
+            edgecolor=STATE_COLOR, linewidth=STATE_LINEWIDTH, zorder=2,
+        )
+
+    if not lightning.empty:
+        if STRIKE_DISPLAY_MODE == "density":
+            if isinstance(HEXBIN_GRIDSIZE, str) and HEXBIN_GRIDSIZE.lower() == "auto":
+                gridsize = _hexbin_gridsize_from_resolution(
+                    lat, lon, lon_min, lon_max, lat_min, lat_max
+                )
+            else:
+                gridsize = HEXBIN_GRIDSIZE
+
+            hb = ax.hexbin(
+                lightning["longitude"], lightning["latitude"],
+                gridsize=gridsize,
+                extent=[lon_min, lon_max, lat_min, lat_max],
+                cmap=HEXBIN_CMAP,
+                mincnt=HEXBIN_MINCOUNT,
+                alpha=HEXBIN_ALPHA,
+                vmin=HEXBIN_VMIN,
+                vmax=HEXBIN_VMAX,
+                transform=proj,
+                linewidths=0.1,
+                zorder=3,
+            )
+            cbar2 = fig.colorbar(
+                hb, ax=ax,
+                orientation="horizontal",
+                fraction=0.045,
+                pad=0.08,
+                shrink=0.8,
+            )
+            cbar2.set_label("Strikes por célula")
+        else:
+            ax.scatter(
+                lightning["longitude"], lightning["latitude"],
+                s=STRIKE_SIZE, color=STRIKE_COLOR, alpha=STRIKE_ALPHA,
+                transform=proj,
+                linewidths=0, rasterized=True, zorder=3,
+            )
+
+    gl = ax.gridlines(
+        draw_labels=True, linestyle="--", linewidth=0.4, alpha=0.5, zorder=2,
+    )
+    gl.top_labels = False
+    gl.right_labels = False
 
     doy = goes_dt.timetuple().tm_yday
     ax.set_title(
@@ -187,17 +412,43 @@ def plot_goes_lightning(goes_dt, temp, lat, lon, lightning, out_path):
         f"  (DOY {doy:03d})  |  strikes: {len(lightning):,}"
     )
 
+    add_provenance_footer(fig, storage_path=str(IMAGE_DIR) + os.sep)
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=130, bbox_inches="tight")
     plt.close(fig)
     print(f"   Saved → {out_path.name}")
 
 
+# ── seleção de data: filtro de parquet ────────────────────────────────────────
+def _extract_date(p: Path):
+    m = re.search(r"(\d{8})", p.name)
+    return datetime.strptime(m.group(1), "%Y%m%d").date() if m else None
+
+
+def _filter_by_date(files: list) -> list:
+    if TARGET_DATE:
+        target = datetime.strptime(TARGET_DATE, "%Y%m%d").date()
+        filtered = [p for p in files if _extract_date(p) == target]
+        print(f"Filtro de data ativo: {TARGET_DATE} → {len(filtered)} arquivo(s) encontrado(s)")
+        return filtered
+
+    if DATE_RANGE:
+        start = datetime.strptime(DATE_RANGE[0], "%Y%m%d").date()
+        end   = datetime.strptime(DATE_RANGE[1], "%Y%m%d").date()
+        filtered = [p for p in files if _extract_date(p) and start <= _extract_date(p) <= end]
+        print(f"Filtro de intervalo ativo: {DATE_RANGE[0]}–{DATE_RANGE[1]} → {len(filtered)} arquivo(s) encontrado(s)")
+        return filtered
+
+    return files
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 parquet_files = sorted(PARQUET_DIR.glob(f"*_{NEW_SAMPLING_RATE}s.parquet"))
+parquet_files = _filter_by_date(parquet_files)
 
 if not parquet_files:
-    print(f"No parquet files found in {PARQUET_DIR}")
+    print(f"No parquet files found in {PARQUET_DIR} (verifique TARGET_DATE / DATE_RANGE)")
 else:
     sess = _build_session()
 
@@ -245,6 +496,7 @@ else:
 
             try:
                 temp, lat, lon = _read_nc(nc_path)
+                temp, lat, lon = _crop_to_roi(temp, lat, lon)
 
                 half_window = timedelta(minutes=cptec_sampling_min / 2)
                 t_min  = pd.Timestamp(goes_dt - half_window)
@@ -253,6 +505,12 @@ else:
                     (lightning["time_stamp"] >= t_min) &
                     (lightning["time_stamp"] <= t_max)
                 ]
+
+                if CROP_TO_ROI:
+                    nearby = nearby[
+                        (nearby["latitude"]  >= ROI_LAT_MIN) & (nearby["latitude"]  <= ROI_LAT_MAX) &
+                        (nearby["longitude"] >= ROI_LON_MIN) & (nearby["longitude"] <= ROI_LON_MAX)
+                    ]
 
                 doy      = goes_dt.timetuple().tm_yday
                 out_name = (

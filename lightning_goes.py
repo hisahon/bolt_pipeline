@@ -20,11 +20,17 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib as mpl
-mpl.rcParams["font.size"]       = 11
-mpl.rcParams["axes.titlesize"]  = 12
-mpl.rcParams["axes.labelsize"]  = 10
-mpl.rcParams["xtick.labelsize"] = 9
-mpl.rcParams["ytick.labelsize"] = 9
+mpl.rcParams["font.size"]       = 14
+mpl.rcParams["axes.titlesize"]  = 14
+mpl.rcParams["axes.labelsize"]  = 14
+mpl.rcParams["xtick.labelsize"] = 14
+mpl.rcParams["ytick.labelsize"] = 14
+
+
+# if FONT_ENGINE == "usetex":
+mpl.rcParams["text.usetex"]  = True
+mpl.rcParams["font.family"]  = "serif"
+
 
 import os
 import re
@@ -62,6 +68,12 @@ VMAX_TEMP         = 0      # °C
 # Se os dois forem None, processa todos os parquet encontrados (comportamento original).
 TARGET_DATE       = "20260722"                       # ex: "20250115"
 DATE_RANGE        = None                       # ex: ("20250110", "20250120")
+
+# TARGET_TIME : se definido (formato 'HHMM', ex: "1230"), gera apenas o
+#               frame GOES mais próximo desse horário, para cada dia sendo
+#               processado (em vez de todos os frames do dia). Use None
+#               para desativar (comportamento original: todos os frames).
+TARGET_TIME       = None                       # ex: "1230"
 
 # ── mapa (cartopy) ─────────────────────────────────────────────────────────
 SHOW_STATES       = True      # desenha fronteiras estaduais (admin_1)
@@ -102,10 +114,10 @@ STRIKE_COLOR      = "red"
 #            de células a partir dela.
 #   int    → número fixo de hexágonos no eixo x (comportamento manual antigo).
 HEXBIN_GRIDSIZE          = "auto"
-HEXBIN_RESOLUTION_FACTOR = 0.5   # 1.0 = mesma resolução do GOES; 0.5 = metade
+HEXBIN_RESOLUTION_FACTOR = 0.25   # 1.0 = mesma resolução do GOES; 0.5 = metade
                                   # da resolução (células com o dobro do tamanho
                                   # do pixel do GOES); 2.0 = o dobro da resolução.
-HEXBIN_CMAP       = "autumn"   # contraste bom sobre o CMAP_GOES (Blues_r)
+HEXBIN_CMAP       = "gnuplot"   # contraste bom sobre o CMAP_GOES (Blues_r)
 HEXBIN_MINCOUNT   = 1         # células com menos raios que isso ficam transparentes
 HEXBIN_ALPHA      = 0.85
 
@@ -114,7 +126,7 @@ HEXBIN_ALPHA      = 0.85
 # para que o matplotlib normalize automaticamente por frame (comportamento
 # padrão, mas cada PNG fica em uma escala diferente).
 HEXBIN_VMIN       = 0        # nº mínimo de raios por célula (cor mais fraca)
-HEXBIN_VMAX       = 70       # nº máximo de raios por célula (cor mais forte);
+HEXBIN_VMAX       = 100       # nº máximo de raios por célula (cor mais forte);
                               # células acima disso saturam na cor de topo do cmap
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -126,6 +138,24 @@ IMAGE_DIR    = Path(IMAGE_DIR)
 
 
 # ── proveniência automática (script / função / storage) ───────────────────────
+def _latex_escape(s: str) -> str:
+    """
+    Escapa caracteres especiais do LaTeX em texto DINAMICO (nomes de arquivo,
+    de funcao, caminhos). Com text.usetex=True, '_' inicia um subscrito e
+    '\\' inicia um comando -- um nome como 'plot_goes_lightning' ou um
+    caminho Windows 'data\\images\\' quebra a renderizacao sem isso
+    (foi exatamente o erro "Undefined control sequence" que voce teve).
+    """
+    s = s.replace("\\", "/")  # separador de path do Windows -> forward slash
+    replacements = {
+        "&": r"\&", "%": r"\%", "$": r"\$", "#": r"\#", "_": r"\_",
+        "{": r"\{", "}": r"\}", "~": r"\textasciitilde{}", "^": r"\textasciicircum{}",
+    }
+    for char, esc in replacements.items():
+        s = s.replace(char, esc)
+    return s
+
+
 def add_provenance_footer(fig, storage_path, x=0.9, y=0.01, **kwargs):
     """
     Adiciona rodapé com Script / Function / Storage no rodapé da figura,
@@ -134,13 +164,14 @@ def add_provenance_footer(fig, storage_path, x=0.9, y=0.01, **kwargs):
     entre scripts.
     """
     caller = inspect.stack()[1]
-    script_name   = os.path.relpath(caller.filename)
-    function_name = caller.function
+    script_name   = _latex_escape(os.path.relpath(caller.filename))
+    function_name = _latex_escape(caller.function)
+    storage_text  = _latex_escape(str(storage_path))
 
     text = (
         f"Script: {script_name}\n"
         f"Function: {function_name}\n"
-        f"Storage: {storage_path}"
+        f"Storage: {storage_text}"
     )
 
     defaults = dict(
@@ -317,7 +348,11 @@ def plot_goes_lightning(goes_dt, temp, lat, lon, lightning, out_path):
 
     proj = ccrs.PlateCarree()
     fig = plt.figure(figsize=(10, 9))
-    ax = plt.axes(projection=proj)
+
+    ax          = fig.add_axes([0.08, 0.16, 0.68, 0.76], projection=proj)
+    cax_temp    = fig.add_axes([0.79, 0.16, 0.02, 0.76])
+    cax_strikes = fig.add_axes([0.08, 0.1, 0.68, 0.02])
+
     ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=proj)
 
     im = ax.imshow(
@@ -331,8 +366,8 @@ def plot_goes_lightning(goes_dt, temp, lat, lon, lightning, out_path):
         interpolation="nearest",
         zorder=1,
     )
-    cbar = fig.colorbar(im, ax=ax, fraction=0.03)
-    cbar.set_label("Brightness temperature (°C)")
+    cbar = fig.colorbar(im, cax=cax_temp)
+    cbar.set_label("Brightness Temperature (°C)")
 
     # ── feições geográficas ────────────────────────────────────────────────
     if SHOW_COASTLINE:
@@ -384,14 +419,8 @@ def plot_goes_lightning(goes_dt, temp, lat, lon, lightning, out_path):
                 linewidths=0.1,
                 zorder=3,
             )
-            cbar2 = fig.colorbar(
-                hb, ax=ax,
-                orientation="horizontal",
-                fraction=0.045,
-                pad=0.08,
-                shrink=0.8,
-            )
-            cbar2.set_label("Strikes por célula")
+            cbar2 = fig.colorbar(hb, cax_strikes, orientation='horizontal')
+            cbar2.set_label("Lightning Strike Density (counts per bin)")
         else:
             ax.scatter(
                 lightning["longitude"], lightning["latitude"],
@@ -408,9 +437,12 @@ def plot_goes_lightning(goes_dt, temp, lat, lon, lightning, out_path):
 
     doy = goes_dt.timetuple().tm_yday
     ax.set_title(
-        f"GOES CH{CHANNEL} IR  |  {goes_dt.strftime('%Y-%m-%d %H:%M')} UTC"
-        f"  (DOY {doy:03d})  |  strikes: {len(lightning):,}"
+        rf"GOES Channel {CHANNEL} (10.3 $\mu$m) $-$ Brightness Temperature $T_B$ $-$ {goes_dt.strftime('%Y-%m-%d')}" + "\n" +
+        rf"\textbf{{{goes_dt.strftime('%H:%M')} UTC}}, "
+        rf"\textbf{{DOY {doy:03d}}}  $-$ "
+        rf"$N_{{\mathrm{{strikes}}}}$ = {len(lightning):,}"
     )
+
 
     add_provenance_footer(fig, storage_path=str(IMAGE_DIR) + os.sep)
 
@@ -474,6 +506,21 @@ else:
         if not day_names:
             print(f"   [WARN] No GOES files found for {file_date}")
             continue
+
+        # ── filtro de horário: mantém só o frame mais próximo de TARGET_TIME ──
+        if TARGET_TIME:
+            target_hh, target_mm = int(TARGET_TIME[:2]), int(TARGET_TIME[2:])
+            target_dt = datetime.combine(file_date, datetime.min.time()).replace(
+                hour=target_hh, minute=target_mm
+            )
+            named_dts = [(n, _dt_from_name(n)) for n in day_names]
+            named_dts = [(n, d) for n, d in named_dts if d is not None]
+            best_name, best_dt = min(
+                named_dts, key=lambda nd: abs((nd[1] - target_dt).total_seconds())
+            )
+            day_names = [best_name]
+            print(f"   Filtro de horário ativo: {TARGET_TIME} → frame mais próximo: "
+                  f"{best_dt.strftime('%H:%M')} ({best_name})")
 
         # infer CPTEC sampling rate from the gaps between consecutive frames
         frame_dts = sorted([_dt_from_name(n) for n in day_names if _dt_from_name(n)])

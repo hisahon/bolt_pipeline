@@ -20,11 +20,11 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib as mpl
-mpl.rcParams["font.size"]       = 14
-mpl.rcParams["axes.titlesize"]  = 14
-mpl.rcParams["axes.labelsize"]  = 14
-mpl.rcParams["xtick.labelsize"] = 14
-mpl.rcParams["ytick.labelsize"] = 14
+mpl.rcParams["font.size"]       = 16
+mpl.rcParams["axes.titlesize"]  = 16
+mpl.rcParams["axes.labelsize"]  = 16
+mpl.rcParams["xtick.labelsize"] = 16
+mpl.rcParams["ytick.labelsize"] = 16
 
 
 # if FONT_ENGINE == "usetex":
@@ -41,6 +41,7 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import requests
 from requests.adapters import HTTPAdapter, Retry
 from bs4 import BeautifulSoup
@@ -163,8 +164,8 @@ IPP_EPOCH_MARKER      = True    # liga/desliga o marcador de epoch
 IPP_EPOCH_MAX_GAP_MIN = 10.0    # ignora o marcador se o IPP mais próximo estiver a mais
                                 # de X min do horário do frame (None = sem limite/sempre marca)
 IPP_EPOCH_MARKER_STYLE = "o"
-IPP_EPOCH_MARKER_SIZE  = 30
-IPP_EPOCH_COLOR        = "lime"
+IPP_EPOCH_MARKER_SIZE  = 50
+IPP_EPOCH_COLOR        = "blue"
 IPP_EPOCH_EDGE_COLOR   = "black"
 IPP_EPOCH_EDGE_WIDTH   = 1.2
 # ─────────────────────────────────────────────────────────────────────────────
@@ -816,20 +817,18 @@ def plot_goes_lightning(goes_dt, temp, lat, lon, lightning, out_path, ipp=None, 
             linewidths=IPP_EPOCH_EDGE_WIDTH, transform=proj, zorder=6,
             label="IPP @ epoch",
         )
-        ax.legend(loc="lower left", fontsize=10, framealpha=0.8)
+        ax.legend(loc="lower left", fontsize=12, framealpha=0.8)
 
     gl = ax.gridlines(
         draw_labels=True, linestyle="--", linewidth=0.4, alpha=0.5, zorder=2,
     )
     gl.top_labels = False
     gl.right_labels = False
+    gl.xlocator = mticker.MultipleLocator(5)
+    gl.ylocator = mticker.MultipleLocator(5)
 
-    doy = goes_dt.timetuple().tm_yday
     ax.set_title(
-        rf"GOES Channel {CHANNEL} (10.3 $\mu$m) $-$ Brightness Temperature $T_B$ $-$ {goes_dt.strftime('%Y-%m-%d')}" + "\n" +
-        rf"\textbf{{{goes_dt.strftime('%H:%M')} UTC}}, "
-        rf"\textbf{{DOY {doy:03d}}}  $-$ "
-        rf"$N_{{\mathrm{{strikes}}}}$ = {len(lightning):,}"
+        rf"\textbf{{{goes_dt.strftime('%H:%M')} UTC - {goes_dt.strftime('%Y/%m/%d')} GOES Infrared (10.3 $\mu$m)}}"
     )
 
 
@@ -865,7 +864,7 @@ def _filter_by_date(files: list) -> list:
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
-def _process_day(pq_path, file_date, ipp_time_range, ipp_pairs, target_time, sess):
+def _process_day(pq_path, file_date, ipp_time_range, ipp_pairs, target_time, sess, frame_time_range=None):
     print(f"\n{'='*60}")
     print(f"File : {pq_path.name}  ({file_date})")
 
@@ -881,6 +880,22 @@ def _process_day(pq_path, file_date, ipp_time_range, ipp_pairs, target_time, ses
     if not day_names:
         print(f"   [WARN] No GOES files found for {file_date}")
         return
+
+    # ── filtro de janela de horário (tbeg/tend, usado no modo manual_runs) ──
+    if frame_time_range:
+        t0, t1 = frame_time_range
+        before = len(day_names)
+        day_names = [
+            n for n in day_names
+            if (d := _dt_from_name(n)) is not None
+            and t0 <= (d.hour + d.minute / 60.0 + d.second / 3600.0) <= t1
+        ]
+        print(f"   Filtro de janela ativo: {_hours_to_hhmm(t0)}–{_hours_to_hhmm(t1)} UTC → "
+              f"{len(day_names)} de {before} frame(s) mantidos")
+
+        if not day_names:
+            print(f"   [WARN] No GOES frames found in {_hours_to_hhmm(t0)}–{_hours_to_hhmm(t1)} for {file_date}")
+            return
 
     # ── filtro de horário: mantém só o frame mais próximo de target_time ──
     if target_time:
@@ -994,6 +1009,7 @@ if manual_runs:
             ipp_pairs=run_cfg["pairs"],
             target_time=None,
             sess=sess,
+            frame_time_range=(run_cfg["tbeg"], run_cfg["tend"]),
         )
 else:
     parquet_files = sorted(PARQUET_DIR.glob(f"*_{NEW_SAMPLING_RATE}s.parquet"))

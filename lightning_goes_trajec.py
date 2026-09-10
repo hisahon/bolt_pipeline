@@ -71,7 +71,8 @@ VMAX_TEMP         = 0      # °C
 # DATE_RANGE  : processa um intervalo (início, fim), ambos 'YYYYMMDD'. Ignorado
 #               se TARGET_DATE estiver definido. Use None para desativar.
 # Se os dois forem None, processa todos os parquet encontrados (comportamento original).
-TARGET_DATE       = "20260723"                       # ex: "20250115"
+# TARGET_DATE       = "20211023"                       # ex: "20250115"
+TARGET_DATE       = "20260722"                       # ex: "20250115"
 DATE_RANGE        = None                       # ex: ("20250110", "20250120")
 
 # TARGET_TIME : se definido (formato 'HHMM', ex: "1230"), gera apenas o
@@ -301,8 +302,8 @@ def obter_parametros_execucao(data_str):
             ]
         },
         (2026, 203): {
-            "tbeg": 14, 
-            "tend": 16,
+            "tbeg": 15, 
+            "tend": 19,
             "pairs": [
                 "fosa · G11", "msdr · R24", "ppte · E23", 
                 "ppte · G12", "ppte · G13", "prma · G12", 
@@ -311,7 +312,7 @@ def obter_parametros_execucao(data_str):
         },
         (2026,204):{
             "tbeg": 16,
-            "tend": 17 + 40/60,
+            "tend": 19,
                         "pairs": [
                                 # "caep · R18",
                                 # "neia · R18",
@@ -339,7 +340,7 @@ def obter_parametros_execucao(data_str):
         
         (2021, 296): {
             "tbeg": 15 + 30/60, 
-            "tend": 16 + 50/60,
+            "tend": 18 + 30/60,
             "pairs": [
                 "coru · G11", "ilha · G29", "mspm · G12", 
                 "msaq · G25", "msbl · R13", "msdr · E02", 

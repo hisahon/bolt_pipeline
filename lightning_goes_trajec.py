@@ -72,7 +72,7 @@ VMAX_TEMP         = 0      # °C
 #               se TARGET_DATE estiver definido. Use None para desativar.
 # Se os dois forem None, processa todos os parquet encontrados (comportamento original).
 # TARGET_DATE       = "20211023"                       # ex: "20250115"
-TARGET_DATE       = "20260722"                       # ex: "20250115"
+TARGET_DATE       = "20260723"                       # ex: "20250115"
 DATE_RANGE        = None                       # ex: ("20250110", "20250120")
 
 # TARGET_TIME : se definido (formato 'HHMM', ex: "1230"), gera apenas o
@@ -292,15 +292,15 @@ def obter_parametros_execucao(data_str):
                             "spcl · R24"
                             ]
             },
-        (2026, 204): {
-            "tbeg": 16, 
-            "tend": 17 + 40/60,
-            "pairs": [
-                "scaq · R18", "stha · R18", "stha · G29", 
-                "itai · R18", "itai · G29", "prcl · G29", 
-                "puma · G11", "fosa · R18", "rosa · G29"
-            ]
-        },
+        # (2026, 204): {
+        #     "tbeg": 16, 
+        #     "tend": 17 + 40/60,
+        #     "pairs": [
+        #         "scaq · R18", "stha · R18", "stha · G29", 
+        #         "itai · R18", "itai · G29", "prcl · G29", 
+        #         "puma · G11", "fosa · R18", "rosa · G29"
+        #     ]
+        # },
         (2026, 203): {
             "tbeg": 15, 
             "tend": 19,

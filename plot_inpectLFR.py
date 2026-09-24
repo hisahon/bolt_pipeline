@@ -12,7 +12,8 @@ rows from the previous/next day, for example) — any row outside the exact
 [00:00:00.000, 24:00:00.000) interval of that day is discarded before
 plotting.
 
-For the chosen days, generates TWO flash-rate (LFR) figures — each day in
+For the chosen days, generates TWO flash-rate (LFR) figures — each with raw
+scatter + moving-average line + moving-std-deviation line — each day in
 its own row, with a vertical offset, X axis = hour of day (UTC), 0-24h.
 Both figures use exactly the same process (round each timestamp to the
 nearest multiple of N seconds via pandas .dt.round, count how many
@@ -43,6 +44,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")  # never opens a window / plot pane — only saves to file
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 from matplotlib.ticker import MultipleLocator
 import numpy as np
 import pandas as pd
@@ -58,10 +60,15 @@ TO_UTC              = 0      # hours to add to timestamps to convert to UTC (0 =
 TIME_SLICE           = (0, 24)  # (HI, HF) hora inicial e final do zoom no eixo X, 0-24; (0, 24) = dia inteiro. Só dá zoom na figura — a média móvel continua calculada sobre o dia inteiro.
 VERTICAL_OFFSET     = None   # None = auto-computed once from the busiest day; or a fixed number (same unit as the Y axis) for every row
 OFFSET_MARGIN       = -0.35  # fraction of the busiest day's peak added to the spacing; negative = adjacent curves intentionally overlap (only used if VERTICAL_OFFSET is None)
-ROW_HEIGHT_IN       = 1.4    # inches of height per day row in the figures — raise this for a taller figure
-GENERATE_15S_FIGURE = False  # set True to also generate the NEW_SAMPLING_RATE figure alongside the fine (1s) one
-SHOW_MOVING_AVERAGE  = True  # overlay a moving-average low-pass curve on the fine (1s) figure
+ROW_HEIGHT_IN       = 2.4    # inches of height per day row in the figures — raise this for a taller figure
+FIGURE_BASE_HEIGHT_IN = 3.5  # inches of height added on top of the rows, for title/axis/legend/footer
+GENERATE_15S_FIGURE = True   # also generate the NEW_SAMPLING_RATE figure alongside the fine (1s) one — both get raw scatter + mov. avg + mov. std
+SHOW_MOVING_AVERAGE  = True  # overlay a moving-average line (solid) on the raw scatter, in both figures
 MOVING_AVG_WINDOW_S  = 45    # seconds; -3dB low-pass cutoff ≈ 0.443/window ≈ 7 mHz for 1s-binned data
+SHOW_MOVING_STD      = True  # overlay a moving std. deviation line (dashed) on the raw scatter, in both figures (same despike rules as the moving average)
+MOVING_STD_WINDOW_S  = 45    # seconds; window of the moving std. deviation (default: same as the moving average)
+SAVE_STD_ONLY_FIGURE = False # also save an extra figure with only the moving std. deviation (days overlaid, no raw scatter)
+MOVING_STD_DDOF      = 1     # 1 = sample std (same as pandas .rolling().std()) | 0 = population std
 # --- DESPIKE: burst handling (only when the moving average is shown) ---
 DESPIKE_MODE         = "ignore"  # "off" = untouched | "ignore" = bursts skipped by the moving average | "mean" = bursts replaced by the local mean
 DESPIKE_FACTOR       = 8.0   # a bin is a burst if count > FACTOR x local mean ...
@@ -168,7 +175,7 @@ def hours_of_day(ts: pd.Series, midnight: pd.Timestamp) -> pd.Series:
     return (ts - midnight).dt.total_seconds() / 3600.0
 
 
-def save_figure(fig, out_path: Path, retries: int = 3, delay_s: float = 1.0) -> None:
+def save_figure(fig, out_path: Path, dpi: int = 150, retries: int = 3, delay_s: float = 1.0) -> None:
     """
     Save with a few retries: on Windows, saving to a folder that's being
     watched/synced (OneDrive, antivirus, indexing) can transiently fail
@@ -177,7 +184,7 @@ def save_figure(fig, out_path: Path, retries: int = 3, delay_s: float = 1.0) -> 
     """
     for attempt in range(1, retries + 1):
         try:
-            fig.savefig(out_path, dpi=150)
+            fig.savefig(out_path, dpi=dpi)
             return
         except OSError as exc:
             if attempt == retries:
@@ -257,12 +264,44 @@ def rolling_mean_convolve(values: pd.Series, window_bins: int) -> pd.Series:
     return pd.Series(result, index=values.index)
 
 
+def rolling_std_convolve(values: pd.Series, window_bins: int, ddof: int = 1) -> pd.Series:
+    """
+    Centered moving standard deviation via numpy.convolve — same window,
+    same edge behavior and same NaN handling as rolling_mean_convolve
+    (so it stays consistent with the moving average drawn in the other
+    figure, and respects DESPIKE_MODE="ignore").
+
+    Uses var = E[x²] - E[x]², computed from three convolutions (count of
+    valid bins, sum of x, sum of x²) over the valid bins in each window,
+    then the ddof correction n/(n-ddof). With ddof=1 the result matches
+    values.rolling(window_bins, center=True, min_periods=2).std().
+    Bins with n <= ddof valid points in the window come out as NaN.
+    """
+    arr = values.to_numpy(dtype=float)
+    valid = ~np.isnan(arr)
+    filled = np.where(valid, arr, 0.0)
+
+    kernel = np.ones(window_bins, dtype=float)
+    n  = np.convolve(valid.astype(float), kernel, mode="same")
+    s1 = np.convolve(filled,              kernel, mode="same")
+    s2 = np.convolve(filled ** 2,         kernel, mode="same")
+
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = s1 / n
+        var  = (s2 / n - mean ** 2) * n / (n - ddof)
+    var = np.where(n > ddof, var, np.nan)
+    var = np.clip(var, 0.0, None)  # tiny negatives from floating-point cancellation -> 0
+
+    return pd.Series(np.sqrt(var), index=values.index)
+
+
 def plot_flash_rate_stack(
     days_data: list[tuple[pd.Timestamp, pd.DataFrame]],
     rate_seconds: int,
     out_path: Path,
     moving_avg_window_s: int | None = None,
     show_raw: bool = True,
+    moving_std_window_s: int | None = None,
 ) -> None:
     """
     Flash rate per rate_seconds-second bin: each timestamp is rounded
@@ -277,8 +316,14 @@ def plot_flash_rate_stack(
     straight line across quiet gaps instead of showing them as zero, and
     a moving average over a gappy index would be meaningless.
 
-    If moving_avg_window_s is given, a centered moving average (low-pass)
-    of that window is overlaid on top of the raw curve, not subtracted.
+    Up to THREE layers are drawn for each day, all on the same row:
+      1) raw counts             -> scatter          (show_raw=True)
+      2) moving average         -> solid line       (moving_avg_window_s)
+      3) moving std. deviation  -> dashed line      (moving_std_window_s)
+    Layers 2 and 3 are overlaid on top of the raw data, not subtracted, and
+    both come from the same despiked series (see DESPIKE_MODE), so bursts
+    are treated identically in the mean and in the std. deviation. Any
+    layer whose window is None is simply skipped.
 
     Each day gets its own color (sampled from a colormap) and its date
     is shown in the legend. Vertical spacing between rows is FIXED —
@@ -289,6 +334,8 @@ def plot_flash_rate_stack(
     if DESPIKE_MODE not in ("off", "ignore", "mean"):
         raise ValueError(f"DESPIKE_MODE must be 'off', 'ignore' or 'mean' (got {DESPIKE_MODE!r})")
 
+    any_smoothing = bool(moving_avg_window_s or moving_std_window_s)
+
     counts_per_day = []
     for date, df in days_data:
         ts_binned = df["time_stamp"].dt.round(f"{rate_seconds}s")
@@ -297,65 +344,81 @@ def plot_flash_rate_stack(
         full_index = pd.date_range(date, date + pd.Timedelta(days=1), freq=f"{rate_seconds}s", inclusive="left")
         counts_full = counts.reindex(full_index, fill_value=0)
 
-        # --- DESPIKE: series feeding the moving average (and optionally the raw curve) ---
+        # --- DESPIKE: series feeding the moving average / std (and optionally the raw curve) ---
         clean = counts_full
-        if DESPIKE_MODE != "off" and moving_avg_window_s:
+        if DESPIKE_MODE != "off" and any_smoothing:
             mask = flag_bursts(counts_full, rate_seconds)
             if DESPIKE_MODE == "ignore":
-                clean = counts_full.mask(mask)  # NaN -> rolling mean skips those bins
+                clean = counts_full.mask(mask)  # NaN -> rolling mean/std skip those bins
             elif DESPIKE_MODE == "mean":
                 win = max(3, round(DESPIKE_WINDOW_S / rate_seconds))
                 local = counts_full.mask(mask).rolling(win, center=True, min_periods=1).mean()
                 clean = counts_full.where(~mask, local)
-            if show_raw:  # print once per day (the moving-average-only figure reuses the same mask)
+            if show_raw:  # print once per day (the other figures reuse the same mask)
                 n_flag = int(mask.sum())
                 share = counts_full[mask].sum() / max(counts_full.sum(), 1)
                 print(f"    {date.date()}: {n_flag:,} burst bins flagged "
                       f"({n_flag / len(counts_full):.2%} of bins, {share:.1%} of events) -> mode '{DESPIKE_MODE}'")
 
-        smoothed = None
+        mean_s = std_s = None
         if moving_avg_window_s:
             window_bins = max(1, round(moving_avg_window_s / rate_seconds))
-            smoothed = rolling_mean_convolve(clean, window_bins)
+            mean_s = rolling_mean_convolve(clean, window_bins)
+        if moving_std_window_s:
+            window_bins = max(1, round(moving_std_window_s / rate_seconds))
+            std_s = rolling_std_convolve(clean, window_bins, ddof=MOVING_STD_DDOF)
 
         raw_plot = clean if DESPIKE_CLEAN_RAW else counts_full
 
-        counts_per_day.append((date, raw_plot, smoothed))
+        counts_per_day.append((date, raw_plot, mean_s, std_s))
 
-    cutoff_mhz = 0.443 / moving_avg_window_s * 1000 if moving_avg_window_s else None
+    fig, ax = plt.subplots(figsize=(14, ROW_HEIGHT_IN * len(days_data) + FIGURE_BASE_HEIGHT_IN))
 
-    fig, ax = plt.subplots(figsize=(14, ROW_HEIGHT_IN * len(days_data) + 2))
-
-    paired = plt.cm.tab20_r.colors  # 12 colors = 6 raw/smoothed pairs (cycles if > 6 days)
-    raw_colors      = [paired[(2 * i) % len(paired)] for i in range(len(days_data))]
-    smoothed_colors = [paired[(2 * i + 1) % len(paired)] for i in range(len(days_data))]
-    
-
+    paired = plt.cm.tab10.colors  # colors for the raw scatter, one per day (cycles if > 6 days)
+    raw_colors = [paired[(2 * i) % len(paired)] for i in range(len(days_data))]
+    MOVING_AVG_COLOR = "black"  # mov. average line: always this color, regardless of day
+    MOVING_STD_COLOR = "tab:blue"  # mov. std line: always this color, regardless of day
 
     if show_raw:
-        global_max = max((c.max() if len(c) else 0 for _, c, _ in counts_per_day), default=0)
+        global_max = max((c.max() if len(c) else 0 for _, c, _, _ in counts_per_day), default=0)
         fixed_step = VERTICAL_OFFSET if VERTICAL_OFFSET else max(global_max * (1 + OFFSET_MARGIN), 1.0)
     else:
         fixed_step = 0.0
 
     y_base = 0.0
-    for idx, (date, counts_full, smoothed) in enumerate(counts_per_day):
+    for idx, (date, counts_full, mean_s, std_s) in enumerate(counts_per_day):
         raw_color = raw_colors[idx]
-        smoothed_color = smoothed_colors[idx]
         ax.axhline(y_base, color="gray", linewidth=0.5, alpha=0.3, zorder=1)
         if len(counts_full):
             x = hours_of_day(counts_full.index.to_series(), date)
             date_label = date.strftime("%Y-%m-%d")
-            if smoothed is not None:
+            if any_smoothing:
                 if show_raw:
                     ax.scatter(x, counts_full.values + y_base, s=2, color=raw_color, zorder=0 + idx)
-                ax.plot(x, smoothed.values + y_base, linewidth=1.0, color=smoothed_color, label=date_label, zorder=100 + idx)
+                if mean_s is not None:
+                    ax.plot(x, mean_s.values + y_base, linewidth=1.0, color=MOVING_AVG_COLOR,
+                            label=date_label, zorder=100 + idx)
+                    date_label = "_nolegend_"  # the date goes in the legend only once per day
+                if std_s is not None:
+                    ax.plot(x, std_s.values + y_base, linewidth=1.0, linestyle=(0, (4, 2)),
+                            color=MOVING_STD_COLOR, label=date_label, zorder=100 + idx)
             else:
                 ax.plot(x, counts_full.values + y_base, linewidth=1.1, color=raw_color, label=date_label, zorder=2 + idx)
-    
+
         y_base += fixed_step
 
-    ax.legend(loc="upper right", fontsize=8, ncol=max(1, len(days_data) // 15))
+    handles, labels = ax.get_legend_handles_labels()
+    if any_smoothing:  # style key: which marker/line style is which layer
+        if show_raw:
+            handles.append(Line2D([], [], marker="o", linestyle="", markersize=3, color="gray"))
+            labels.append("raw")
+        if moving_avg_window_s:
+            handles.append(Line2D([], [], linestyle="-", linewidth=1.0, color=MOVING_AVG_COLOR))
+            labels.append(f"mov. avg ({moving_avg_window_s}s)")
+        if moving_std_window_s:
+            handles.append(Line2D([], [], linestyle=(0, (4, 2)), linewidth=1.0, color=MOVING_STD_COLOR))
+            labels.append(f"mov. std ({moving_std_window_s}s)")
+    ax.legend(handles, labels, loc="upper right", fontsize=8, ncol=max(1, len(days_data) // 15))
 
     x_start, x_end = TIME_SLICE
     ax.set_xlim(x_start, x_end)
@@ -375,18 +438,19 @@ def plot_flash_rate_stack(
         ax.set_ylabel(f"Lightning flash rate (flashes/{rate_seconds}s)")
     title = f"Flash rate — resampled, {rate_seconds}s bins (rounded)"
     if moving_avg_window_s:
-        # title += f"  +  ~{cutoff_mhz:.1f} mHz low-pass"
-        title += f"  +  ~{MOVING_AVG_WINDOW_S} sec mov. avg"
-        if DESPIKE_MODE != "off":
-            title += f"  |  bursts >{DESPIKE_FACTOR:g}x local mean: {DESPIKE_MODE}"
-            title += " (raw too)" if DESPIKE_CLEAN_RAW else ""
+        title += f"  +  ~{moving_avg_window_s} sec mov. avg"
+    if moving_std_window_s:
+        title += f"  +  ~{moving_std_window_s} sec mov. std"
+    if any_smoothing and DESPIKE_MODE != "off":
+        title += f"  |  bursts >{DESPIKE_FACTOR:g}x local mean: {DESPIKE_MODE}"
+        title += " (raw too)" if DESPIKE_CLEAN_RAW else ""
     ax.set_title(title)
     # reserva ~0.75" na base para o rodapé (em fração da altura, já que a figura
     # muda de altura conforme o nº de dias) e evita que o tight_layout o cubra
     footer_frac = 0.75 / fig.get_figheight()
     fig.tight_layout(rect=[0, footer_frac, 1, 1])
     add_provenance_footer(fig, out_path)
-    save_figure(fig, out_path, dpi = 300)
+    save_figure(fig, out_path, dpi=300)
     plt.close(fig)
 
 
@@ -426,14 +490,28 @@ def main() -> None:
 
     fine_out   = output_dir / f"lfr_resampled_{FINE_RATE_SECONDS}s_{date_tag}.png"
     ma_out     = output_dir / f"lfr_moving_avg_{MOVING_AVG_WINDOW_S}s_{date_tag}.png"
+    std_out    = output_dir / f"lfr_moving_std_{MOVING_STD_WINDOW_S}s_{date_tag}.png"
     coarse_out = output_dir / f"lfr_resampled_{NEW_SAMPLING_RATE}s_{date_tag}.png"
 
-    print(f"\nGenerating figure with {FINE_RATE_SECONDS}s bins...")
+    avg_w = MOVING_AVG_WINDOW_S if SHOW_MOVING_AVERAGE else None
+    std_w = MOVING_STD_WINDOW_S if SHOW_MOVING_STD else None
+
+    print(f"\nGenerating figure with {FINE_RATE_SECONDS}s bins (raw + mov. avg + mov. std)...")
     plot_flash_rate_stack(
         days_data, FINE_RATE_SECONDS, fine_out,
-        moving_avg_window_s=MOVING_AVG_WINDOW_S if SHOW_MOVING_AVERAGE else None,
+        moving_avg_window_s=avg_w, moving_std_window_s=std_w,
     )
     print(f"  saved -> {fine_out}")
+
+    if GENERATE_15S_FIGURE:
+        print(f"Generating figure with {NEW_SAMPLING_RATE}s bins (raw + mov. avg + mov. std)...")
+        plot_flash_rate_stack(
+            days_data, NEW_SAMPLING_RATE, coarse_out,
+            moving_avg_window_s=avg_w, moving_std_window_s=std_w,
+        )
+        print(f"  saved -> {coarse_out}")
+    else:
+        print(f"{NEW_SAMPLING_RATE}s figure skipped (GENERATE_15S_FIGURE = False)")
 
     if SHOW_MOVING_AVERAGE:
         print("Generating moving-average-only figure...")
@@ -443,12 +521,13 @@ def main() -> None:
         )
         print(f"  saved -> {ma_out}")
 
-    if GENERATE_15S_FIGURE:
-        print(f"Generating figure with {NEW_SAMPLING_RATE}s bins...")
-        plot_flash_rate_stack(days_data, NEW_SAMPLING_RATE, coarse_out)
-        print(f"  saved -> {coarse_out}")
-    else:
-        print(f"{NEW_SAMPLING_RATE}s figure skipped (GENERATE_15S_FIGURE = False)")
+    if SAVE_STD_ONLY_FIGURE and SHOW_MOVING_STD:
+        print("Generating moving-std-only figure...")
+        plot_flash_rate_stack(
+            days_data, FINE_RATE_SECONDS, std_out,
+            moving_std_window_s=MOVING_STD_WINDOW_S, show_raw=False,
+        )
+        print(f"  saved -> {std_out}")
 
     print("\nDone.")
 

@@ -62,9 +62,26 @@ IMAGE_DIR         = r"data\images"
 NEW_SAMPLING_RATE = 15
 CHANNEL           = 13
 GOES_TIMEOUT      = 30.0
-CMAP_GOES         = "Blues_r"
 VMIN_TEMP         = -80       # °C
-VMAX_TEMP         = 0      # °C
+VMAX_TEMP         = 40        # °C (a escala realçada vai de -80 a 40 °C)
+
+# Escala realçada do canal 13 (10,35 µm): faixas coloridas de 10 °C entre
+# -80 e -30 °C e degradê de cinza claro -> preto de -30 a 40 °C.
+# Temperaturas repetidas criam os "saltos" de cor entre as faixas.
+_TB_PONTOS = [
+    (-80, (224, 131, 224)), (-70, (255, 209, 255)),  # magenta -> rosa claro
+    (-70, (0, 0, 255)),     (-60, (82, 69, 255)),    # azul
+    (-60, (47, 218, 255)),  (-50, (156, 227, 245)),  # ciano
+    (-50, (255, 255, 97)),  (-40, (235, 255, 122)),  # amarelo
+    (-40, (255, 101, 1)),   (-30, (255, 158, 70)),   # laranja
+    (-30, (176, 176, 176)), (40, (0, 0, 0)),         # cinza claro -> preto
+]
+CMAP_GOES = mpl.colors.LinearSegmentedColormap.from_list(
+    "tb_realcada",
+    [((t - VMIN_TEMP) / (VMAX_TEMP - VMIN_TEMP), [v / 255 for v in c])
+     for t, c in _TB_PONTOS],
+    N=1024,
+)
 
 # ── seleção de data ────────────────────────────────────────────────────────
 # TARGET_DATE : processa apenas um dia específico. Formato 'YYYYMMDD' ou None.
@@ -97,10 +114,15 @@ BORDER_COLOR      = "black"
 # Limita a imagem GOES e os raios a uma sub-região, em vez do domínio inteiro
 # baixado. Defina CROP_TO_ROI = False para voltar a usar a extensão completa.
 CROP_TO_ROI       = True
-ROI_LAT_MIN       = -35
-ROI_LAT_MAX       = -15
-ROI_LON_MIN       = -65
-ROI_LON_MAX       = -45
+# ROI_LAT_MIN       = -35
+# ROI_LAT_MAX       = -15
+# ROI_LON_MIN       = -65
+# ROI_LON_MAX       = -45
+
+ROI_LAT_MIN       = -30
+ROI_LAT_MAX       = -20
+ROI_LON_MIN       = -60
+ROI_LON_MAX       = -50
 
 # ── raios (aparência) ──────────────────────────────────────────────────────
 # 'scatter' : um ponto por raio (rápido de entender, mas alpha satura e some
@@ -122,10 +144,10 @@ STRIKE_COLOR      = "red"
 #            de células a partir dela.
 #   int    → número fixo de hexágonos no eixo x (comportamento manual antigo).
 HEXBIN_GRIDSIZE          = "auto"
-HEXBIN_RESOLUTION_FACTOR = 0.25   # 1.0 = mesma resolução do GOES; 0.5 = metade
+HEXBIN_RESOLUTION_FACTOR = 0.15   # 1.0 = mesma resolução do GOES; 0.5 = metade
                                   # da resolução (células com o dobro do tamanho
                                   # do pixel do GOES); 2.0 = o dobro da resolução.
-HEXBIN_CMAP       = "gnuplot"   # contraste bom sobre o CMAP_GOES (Blues_r)
+HEXBIN_CMAP       = "jet"   # escala de cor dos raios (contagem por célula)
 HEXBIN_MINCOUNT   = 1         # células com menos raios que isso ficam transparentes
 HEXBIN_ALPHA      = 0.85
 
@@ -134,7 +156,7 @@ HEXBIN_ALPHA      = 0.85
 # para que o matplotlib normalize automaticamente por frame (comportamento
 # padrão, mas cada PNG fica em uma escala diferente).
 HEXBIN_VMIN       = 0        # nº mínimo de raios por célula (cor mais fraca)
-HEXBIN_VMAX       = 100       # nº máximo de raios por célula (cor mais forte);
+HEXBIN_VMAX       = 60       # nº máximo de raios por célula (cor mais forte);
                               # células acima disso saturam na cor de topo do cmap
 
 # ── IPPs de GNSS (trajetória) ───────────────────────────────────────────────
@@ -148,7 +170,7 @@ IPP_LON_RANGE   = (ROI_LON_MIN, ROI_LON_MAX)
 IPP_TIME_RANGE  = None      # (tbeg, tend) em horas decimais UTC, ou None p/ o dia inteiro
 IPP_STATIONS    = None      # lista de estações (ex.: ["ppte", "puma"]) ou None p/ todas
 IPP_PAIRS       = None      # lista "estacao · PRN" (ex.: ["ppte · G12"]) ou None p/ todas
-IPP_CMAP        = "turbo"   # escala de cor para o horário (t_hours)
+IPP_CMAP        = "rainbow"   # escala de cor para o horário (t_hours)
 IPP_MARKER_SIZE = 2
 IPP_ALPHA       = 1.
 

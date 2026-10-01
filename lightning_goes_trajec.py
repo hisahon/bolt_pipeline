@@ -334,7 +334,7 @@ def obter_parametros_execucao(data_str):
         },
         (2026,204):{
             "tbeg": 16,
-            "tend": 19,
+            "tend": 21,
                         "pairs": [
                                 # "caep · R18",
                                 # "neia · R18",

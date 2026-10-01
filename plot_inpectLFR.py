@@ -33,6 +33,7 @@ Usage:
 """
 
 # %% Imports
+import functools
 import gzip
 import inspect
 import os
@@ -65,7 +66,7 @@ FIGURE_BASE_HEIGHT_IN = 3.5  # inches of height added on top of the rows, for ti
 GENERATE_15S_FIGURE = True   # also generate the NEW_SAMPLING_RATE figure alongside the fine (1s) one — both get raw scatter + mov. avg + mov. std
 SHOW_MOVING_AVERAGE  = True  # overlay a moving-average line (solid) on the raw scatter, in both figures
 MOVING_AVG_WINDOW_S  = 45    # seconds; -3dB low-pass cutoff ≈ 0.443/window ≈ 7 mHz for 1s-binned data
-SHOW_MOVING_STD      = True  # overlay a moving std. deviation line (dashed) on the raw scatter, in both figures (same despike rules as the moving average)
+SHOW_MOVING_STD      = False  # overlay a moving std. deviation line (dashed) on the raw scatter, in both figures (same despike rules as the moving average)
 MOVING_STD_WINDOW_S  = 45    # seconds; window of the moving std. deviation (default: same as the moving average)
 SAVE_STD_ONLY_FIGURE = False # also save an extra figure with only the moving std. deviation (days overlaid, no raw scatter)
 MOVING_STD_DDOF      = 1     # 1 = sample std (same as pandas .rolling().std()) | 0 = population std
@@ -203,7 +204,7 @@ def add_provenance_footer(fig, storage_path, x=0.9, y=0.01, **kwargs):
     caller = inspect.stack()[1]
     script_name   = os.path.relpath(caller.filename)
     function_name = caller.function
-    storage_text  = str(storage_path)
+    storage_text  = Path(storage_path).as_posix()  # '/' em vez de '\' (no LaTeX, '\' inicia um comando)
 
     text = (
         f"Script: {script_name}\n"
@@ -217,6 +218,7 @@ def add_provenance_footer(fig, storage_path, x=0.9, y=0.01, **kwargs):
         fontsize=10,
         color='black',
         alpha=0.7,
+        usetex=False,  # o rodapé tem '_' e caminhos; nunca deve passar pelo LaTeX
     )
     defaults.update(kwargs)
 
@@ -295,6 +297,30 @@ def rolling_std_convolve(values: pd.Series, window_bins: int, ddof: int = 1) -> 
     return pd.Series(np.sqrt(var), index=values.index)
 
 
+def isolated_rcparams(func):
+    """
+    Decorator: roda a função com text.usetex=False (rc_context) e fecha
+    qualquer figura que ela tenha deixado aberta se der erro.
+
+    Motivo: no Spyder/IPython o rcParams persiste entre scripts — se outro
+    script (ex.: via shared.config) ligou text.usetex=True, este script
+    herdaria isso e o LaTeX quebraria em textos com '\\' ou '_'. O
+    rc_context restaura o rcParams original ao sair, sem afetar os outros
+    scripts da sessão.
+    """
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        figs_before = set(plt.get_fignums())
+        try:
+            with plt.rc_context({"text.usetex": False}):
+                return func(*args, **kwargs)
+        finally:
+            for num in set(plt.get_fignums()) - figs_before:
+                plt.close(num)  # evita que o Spyder tente redesenhar uma figura quebrada
+    return wrapper
+
+
+@isolated_rcparams
 def plot_flash_rate_stack(
     days_data: list[tuple[pd.Timestamp, pd.DataFrame]],
     rate_seconds: int,
@@ -374,7 +400,7 @@ def plot_flash_rate_stack(
 
     fig, ax = plt.subplots(figsize=(14, ROW_HEIGHT_IN * len(days_data) + FIGURE_BASE_HEIGHT_IN))
 
-    paired = plt.cm.tab10.colors  # colors for the raw scatter, one per day (cycles if > 6 days)
+    paired = plt.cm.tab10_r.colors  # colors for the raw scatter, one per day (cycles if > 6 days)
     raw_colors = [paired[(2 * i) % len(paired)] for i in range(len(days_data))]
     MOVING_AVG_COLOR = "black"  # mov. average line: always this color, regardless of day
     MOVING_STD_COLOR = "tab:blue"  # mov. std line: always this color, regardless of day
@@ -386,6 +412,7 @@ def plot_flash_rate_stack(
         fixed_step = 0.0
 
     y_base = 0.0
+    day_handles, day_labels = [], []  # legend entries "date -> day color" (used when smoothing is on)
     for idx, (date, counts_full, mean_s, std_s) in enumerate(counts_per_day):
         raw_color = raw_colors[idx]
         ax.axhline(y_base, color="gray", linewidth=0.5, alpha=0.3, zorder=1)
@@ -393,30 +420,43 @@ def plot_flash_rate_stack(
             x = hours_of_day(counts_full.index.to_series(), date)
             date_label = date.strftime("%Y-%m-%d")
             if any_smoothing:
+                # Com o raw visível, as linhas de média/std têm cor fixa (preta/azul) e o
+                # raw carrega a cor do dia. Sem o raw (figura só com média/std), os dias
+                # ficam sobrepostos — então as próprias linhas levam a cor do dia.
+                avg_color = MOVING_AVG_COLOR if show_raw else raw_color
+                std_color = MOVING_STD_COLOR if show_raw else raw_color
                 if show_raw:
                     ax.scatter(x, counts_full.values + y_base, s=2, color=raw_color, zorder=0 + idx)
                 if mean_s is not None:
-                    ax.plot(x, mean_s.values + y_base, linewidth=1.0, color=MOVING_AVG_COLOR,
-                            label=date_label, zorder=100 + idx)
-                    date_label = "_nolegend_"  # the date goes in the legend only once per day
+                    ax.plot(x, mean_s.values + y_base, linewidth=1.0, color=avg_color,
+                            zorder=100 + idx)
                 if std_s is not None:
                     ax.plot(x, std_s.values + y_base, linewidth=1.0, linestyle=(0, (4, 2)),
-                            color=MOVING_STD_COLOR, label=date_label, zorder=100 + idx)
+                            color=std_color, zorder=100 + idx)
+                # legenda do dia: SEMPRE na cor do dia (a linha preta da média não identifica o dia)
+                if show_raw:
+                    day_handles.append(Line2D([], [], marker="o", linestyle="", markersize=5, color=raw_color))
+                else:
+                    day_handles.append(Line2D([], [], linestyle="-", linewidth=2.0, color=raw_color))
+                day_labels.append(date_label)
             else:
                 ax.plot(x, counts_full.values + y_base, linewidth=1.1, color=raw_color, label=date_label, zorder=2 + idx)
 
         y_base += fixed_step
 
     handles, labels = ax.get_legend_handles_labels()
-    if any_smoothing:  # style key: which marker/line style is which layer
+    if any_smoothing:  # dates in each day's color + style key (which marker/line style is which layer)
+        handles, labels = list(day_handles), list(day_labels)
+        key_avg_color = MOVING_AVG_COLOR if show_raw else "gray"
+        key_std_color = MOVING_STD_COLOR if show_raw else "gray"
         if show_raw:
             handles.append(Line2D([], [], marker="o", linestyle="", markersize=3, color="gray"))
             labels.append("raw")
         if moving_avg_window_s:
-            handles.append(Line2D([], [], linestyle="-", linewidth=1.0, color=MOVING_AVG_COLOR))
+            handles.append(Line2D([], [], linestyle="-", linewidth=1.0, color=key_avg_color))
             labels.append(f"mov. avg ({moving_avg_window_s}s)")
         if moving_std_window_s:
-            handles.append(Line2D([], [], linestyle=(0, (4, 2)), linewidth=1.0, color=MOVING_STD_COLOR))
+            handles.append(Line2D([], [], linestyle=(0, (4, 2)), linewidth=1.0, color=key_std_color))
             labels.append(f"mov. std ({moving_std_window_s}s)")
     ax.legend(handles, labels, loc="upper right", fontsize=8, ncol=max(1, len(days_data) // 15))
 

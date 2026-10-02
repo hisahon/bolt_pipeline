@@ -88,8 +88,8 @@ CMAP_GOES = mpl.colors.LinearSegmentedColormap.from_list(
 # DATE_RANGE  : processa um intervalo (início, fim), ambos 'YYYYMMDD'. Ignorado
 #               se TARGET_DATE estiver definido. Use None para desativar.
 # Se os dois forem None, processa todos os parquet encontrados (comportamento original).
-# TARGET_DATE       = "20211023"                       # ex: "20250115"
-TARGET_DATE       = "20260723"                       # ex: "20250115"
+TARGET_DATE       = "20211023"                       # ex: "20250115"
+# TARGET_DATE       = "20260723"                       # ex: "20250115"
 DATE_RANGE        = None                       # ex: ("20250110", "20250120")
 
 # TARGET_TIME : se definido (formato 'HHMM', ex: "1230"), gera apenas o
@@ -114,15 +114,15 @@ BORDER_COLOR      = "black"
 # Limita a imagem GOES e os raios a uma sub-região, em vez do domínio inteiro
 # baixado. Defina CROP_TO_ROI = False para voltar a usar a extensão completa.
 CROP_TO_ROI       = True
-# ROI_LAT_MIN       = -35
-# ROI_LAT_MAX       = -15
-# ROI_LON_MIN       = -65
-# ROI_LON_MAX       = -45
+ROI_LAT_MIN       = -35
+ROI_LAT_MAX       = -15
+ROI_LON_MIN       = -65
+ROI_LON_MAX       = -45
 
-ROI_LAT_MIN       = -30
-ROI_LAT_MAX       = -20
-ROI_LON_MIN       = -60
-ROI_LON_MAX       = -50
+# ROI_LAT_MIN       = -30
+# ROI_LAT_MAX       = -20
+# ROI_LON_MIN       = -60
+# ROI_LON_MAX       = -50
 
 # ── raios (aparência) ──────────────────────────────────────────────────────
 # 'scatter' : um ponto por raio (rápido de entender, mas alpha satura e some
@@ -144,10 +144,10 @@ STRIKE_COLOR      = "red"
 #            de células a partir dela.
 #   int    → número fixo de hexágonos no eixo x (comportamento manual antigo).
 HEXBIN_GRIDSIZE          = "auto"
-HEXBIN_RESOLUTION_FACTOR = 0.15   # 1.0 = mesma resolução do GOES; 0.5 = metade
+HEXBIN_RESOLUTION_FACTOR = 0.25   # 1.0 = mesma resolução do GOES; 0.5 = metade
                                   # da resolução (células com o dobro do tamanho
                                   # do pixel do GOES); 2.0 = o dobro da resolução.
-HEXBIN_CMAP       = "jet"   # escala de cor dos raios (contagem por célula)
+HEXBIN_CMAP       = "inferno"   # escala de cor dos raios (contagem por célula)
 HEXBIN_MINCOUNT   = 1         # células com menos raios que isso ficam transparentes
 HEXBIN_ALPHA      = 0.85
 

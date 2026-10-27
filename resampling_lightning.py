@@ -28,9 +28,9 @@ import pandas as pd
 
 
 # ── CONFIG — edit these lines ─────────────────────────────────────────────────
-INPUT_DIR            = r"data\raw"
-OUTPUT_DIR           = r"data\parquet"
-NEW_SAMPLING_RATE    = 15
+INPUT_DIR            = r"data\raw_SA"
+OUTPUT_DIR           = r"data\resampled_SA"
+NEW_SAMPLING_RATE    = 60
 VISUALIZATION_PLOTS  = True
 TO_UTC               = 0     # hours to add to timestamps to convert to UTC (0 = already UTC)
 # ─────────────────────────────────────────────────────────────────────────────

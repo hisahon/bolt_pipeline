@@ -66,11 +66,11 @@ from shared.config import dtec_ipp_dir
 
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-PARQUET_DIR       = r"data\parquet"
+PARQUET_DIR       = r"data\resampled_SA"
 GOES_TMP_DIR      = r"data\goes_tmp"
 IMAGE_DIR         = r"data\images"
 MAP_DIR           = r"data\maps"      # figuras de LFR: MAP_DIR/{YYYYMMDD}/*_LFR.png
-NEW_SAMPLING_RATE = 15
+NEW_SAMPLING_RATE = 60
 CHANNEL           = 13
 GOES_TIMEOUT      = 30.0
 VMIN_TEMP         = -80       # °C
@@ -126,10 +126,10 @@ BORDER_COLOR      = "black"
 # Limita a imagem GOES e os raios a uma sub-região, em vez do domínio inteiro
 # baixado. Defina CROP_TO_ROI = False para voltar a usar a extensão completa.
 CROP_TO_ROI       = True
-ROI_LAT_MIN       = -35
-ROI_LAT_MAX       = -15
-ROI_LON_MIN       = -65
-ROI_LON_MAX       = -45
+ROI_LAT_MIN       = -55
+ROI_LAT_MAX       = -10
+ROI_LON_MIN       = -80
+ROI_LON_MAX       = -40
 
 # ROI_LAT_MIN       = -30
 # ROI_LAT_MAX       = -20
@@ -435,8 +435,8 @@ def obter_parametros_execucao(data_str):
             ]
         },
         (2026,204):{
-            "tbeg": 16,
-            "tend": 21,
+            # "tbeg": 16, "tend": 21,
+            "tbeg": 0, "tend": 24,
                         "pairs": [
                                 # "caep · R18",
                                 # "neia · R18",

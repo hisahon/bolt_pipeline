@@ -102,6 +102,13 @@ CMAP_GOES = mpl.colors.LinearSegmentedColormap.from_list(
 TARGET_DATE       = "20211023"                       # ex: "20250115"
 TARGET_DATE       = "20260723"                       # ex: "20250115"
 # TARGET_DATE       = "20231213"                       # ex: "20250115"
+
+
+
+
+
+
+
 DATE_RANGE        = None                       # ex: ("20250110", "20250120")
 LFR_YMAX           = 10           # eixo y fixo (fl/s) p/ comparar frames; None = automático
 # TARGET_TIME : se definido (formato 'HHMM', ex: "1230"), gera apenas o

@@ -19,12 +19,37 @@ Tracking das tempestades (independe de raios):
 
 Folder layout:
     data/
-        goes_tmp/   ← .nc temporário durante o download (apagado após o plot)
+        goes_tmp/   ← normalmente VAZIA: o .nc do GOES é baixado para a memória e decodificado com numpy
+                      (GOES_IN_MEMORY); só é usada como reserva (arquivo que não é NetCDF-3 e sem leitor
+                      de biblioteca em memória) ou se GOES_IN_MEMORY = False
         maps_keo/   ← saída: maps_keo/{YYYYMMDD}/*_MAPKEO.png
     (máscaras: MASK_DIR; keogramas: dtec_keogram_dir(year, doy) de shared.config)
 
 Basta ajustar o bloco CONFIG abaixo e rodar (Spyder ou terminal).
 """
+
+# ── LaTeX / cache FORA do C: ─────────────────────────────────────────────────
+# Com USE_LATEX = True o matplotlib chama latex + dvipng e grava .tex/.dvi/.png em
+# ~/.matplotlib/tex.cache e em %TEMP% (normalmente no C:); o MiKTeX/TeX Live ainda grava
+# logs próprios a cada chamada. CACHE_DIR leva o cache do matplotlib e o TEMP para outra pasta.
+#   ATENÇÃO: este bloco precisa rodar ANTES do 1º import do matplotlib no processo. No Spyder,
+#   reinicie o kernel (ou rode no terminal) depois de mudar; num console que já importou o
+#   matplotlib o redirecionamento não tem efeito. Na 1ª execução o cache de fontes é refeito.
+USE_LATEX = False           # False = mathtext do matplotlib: sem latex/dvipng, quase nenhuma escrita em
+                            #         disco (a fonte do texto muda um pouco; fórmulas ficam em estilo CM).
+                            # True  = LaTeX (acabamento de publicação; lento e grava muito no C:)
+CACHE_DIR = r"data\cache"   # relativo à pasta de execução (a mesma do data\goes_tmp); None = não redireciona
+
+import os
+import tempfile
+from pathlib import Path
+
+if CACHE_DIR:
+    _cache_root = Path(CACHE_DIR).resolve()
+    (_cache_root / "tmp").mkdir(parents=True, exist_ok=True)
+    os.environ["MPLCONFIGDIR"] = str(_cache_root / "mpl")     # cache do matplotlib (tex.cache, fontes)
+    os.environ["TEMP"] = os.environ["TMP"] = str(_cache_root / "tmp")   # herdado pelo latex/dvipng
+    tempfile.tempdir = str(_cache_root / "tmp")
 
 import matplotlib
 matplotlib.use("Agg")
@@ -36,14 +61,15 @@ mpl.rcParams["axes.labelsize"]  = 16
 mpl.rcParams["xtick.labelsize"] = 16
 mpl.rcParams["ytick.labelsize"] = 16
 
-mpl.rcParams["text.usetex"]  = True
+mpl.rcParams["text.usetex"]  = USE_LATEX
 mpl.rcParams["font.family"]  = "serif"
+if not USE_LATEX:
+    mpl.rcParams["mathtext.fontset"] = "cm"   # $\mu$, $T_b$ etc. em Computer Modern (parecido com o LaTeX)
 
-import os
+import io
 import re
 import time
 import inspect
-from pathlib import Path
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -63,8 +89,12 @@ from shared.config import dtec_keogram_dir
 
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-GOES_TMP_DIR      = r"data\goes_tmp"
-OUT_DIR           = r"data\maps_keo-nolightning"      # figuras: OUT_DIR/{YYYYMMDD}/*_MAPKEO.png
+GOES_IN_MEMORY    = True      # True = baixa o .nc do GOES para a memória e o decodifica com numpy (se for
+                              #        NetCDF-3; ver _read_nc_memory) -- nada em disco, ~1 arquivo .nc de RAM
+                              #        por vez. False = grava em GOES_TMP_DIR, lê e apaga.
+GOES_TMP_DIR      = r"data\goes_tmp"      # só usada com GOES_IN_MEMORY = False, ou como reserva se o .nc NÃO
+                                          # for NetCDF-3 e nenhum leitor de biblioteca em memória funcionar
+OUT_DIR           = r"data\maps_keo"      # figuras: OUT_DIR/{YYYYMMDD}/*_MAPKEO.png
 CHANNEL           = 13
 GOES_TIMEOUT      = 30.0
 VMIN_TEMP         = -80       # °C
@@ -114,9 +144,6 @@ TARGET_DATE       = "20240829"
 # TARGET_DATE       = "20260621"
 # TARGET_DATE       = "20260623"
 # TARGET_DATE       = "20260627"
-
-
-
 DATE_RANGE        = None                 # ex: ("20250110", "20250120")
 # TARGET_TIME : 'HHMM' -> só o frame GOES mais próximo desse horário, em cada dia. None = todos os frames.
 TARGET_TIME       = None                 # ex: "1230"
@@ -316,39 +343,268 @@ def _dt_from_name(name: str) -> datetime | None:
     return None
 
 
-# ── download one .nc ─────────────────────────────────────────────────────────
-def _download_nc(sess: requests.Session, url: str, nc_name: str) -> Path | None:
-    GOES_TMP_DIR.mkdir(parents=True, exist_ok=True)
-    tmp_nc   = GOES_TMP_DIR / nc_name
-    tmp_part = tmp_nc.with_suffix(".nc.part")
+# ── download one .nc EM MEMÓRIA (nada é gravado em disco) ───────────────────
+def _download_nc_bytes(sess: requests.Session, url: str, nc_name: str) -> bytes | None:
+    """
+    Baixa o .nc do GOES direto para a memória. Confere o tamanho recebido contra o Content-Length
+    (um download cortado no meio devolveria um arquivo truncado, sem o .part/os.replace de antes).
+    Devolve os bytes, ou None em caso de erro.
+    """
     try:
+        buf = io.BytesIO()
         with sess.get(url, stream=True, timeout=GOES_TIMEOUT) as r:
             r.raise_for_status()
-            with open(tmp_part, "wb") as f:
-                for chunk in r.iter_content(8 * 1024 * 1024):
-                    if chunk:
-                        f.write(chunk)
-        os.replace(tmp_part, tmp_nc)
-        return tmp_nc
+            for chunk in r.iter_content(8 * 1024 * 1024):
+                if chunk:
+                    buf.write(chunk)
+            expected = r.headers.get("Content-Length")
+            if (expected and expected.isdigit() and not r.headers.get("Content-Encoding")
+                    and buf.tell() != int(expected)):
+                raise IOError(f"download incompleto: {buf.tell()} de {expected} bytes")
+        return buf.getvalue()
     except Exception as e:
         print(f"   [ERR] Downloading {nc_name}: {e}")
-        for p in (tmp_part, tmp_nc):
-            try:
-                if p.exists():
-                    p.unlink(missing_ok=True)
-            except Exception:
-                pass
         return None
 
 
 # ── read .nc → arrays ────────────────────────────────────────────────────────
+def _dataset_to_arrays(ds) -> tuple:
+    lats = ds["lat"].values.astype("float32")
+    lons = ds["lon"].values.astype("float32")
+    temp = ds["Band1"].astype("float32").values / 100.0 - np.float32(273.13)
+    return temp, lats, lons
+
+
 def _read_nc(nc_path: Path) -> tuple:
+    """Leitura a partir de um ARQUIVO (usada só na reserva em disco)."""
     import xarray as xr
     with xr.open_dataset(nc_path) as ds:
-        lats = ds["lat"].values.astype("float32")
-        lons = ds["lon"].values.astype("float32")
-        temp = ds["Band1"].astype("float32").values / 100.0 - np.float32(273.13)
+        return _dataset_to_arrays(ds)
+
+
+def _open_nc_memory(raw: bytes):
+    """
+    Abre o .nc a partir dos bytes, sem arquivo. Tenta, em ordem: netCDF4 em memória (mesma
+    decodificação de abrir por caminho), h5netcdf e scipy. Levanta RuntimeError se nenhum servir.
+    """
+    import xarray as xr
+    errors = []
+    try:
+        import netCDF4 as nc4
+        from xarray.backends import NetCDF4DataStore
+        return xr.open_dataset(NetCDF4DataStore(nc4.Dataset("goes_in_memory.nc", mode="r", memory=raw)))
+    except Exception as e:
+        errors.append(f"netCDF4 ({type(e).__name__}: {str(e)[:50]})")
+    for engine in ("h5netcdf", "scipy"):
+        try:
+            return xr.open_dataset(io.BytesIO(raw), engine=engine)
+        except Exception as e:
+            errors.append(f"{engine} ({type(e).__name__}: {str(e)[:50]})")
+    raise RuntimeError("nenhum leitor em memória funcionou: " + "; ".join(errors))
+
+
+# ── decodificador NetCDF-3 SÓ com numpy/struct (sem xarray, netCDF4, h5py nem scipy) ─────────────
+# Se o .nc começa com b"CDF\x01" (clássico) ou b"CDF\x02" (64-bit offset), os bytes baixados são
+# decodificados aqui mesmo, em memória. NetCDF-4/HDF5 (b"\x89HDF") NÃO tem como ser lido só com
+# numpy (o HDF5 é um contêiner complexo): nesse caso _read_nc_memory cai nos leitores de biblioteca.
+_NC3_DTYPES = {1: ">i1", 2: "S1", 3: ">i2", 4: ">i4", 5: ">f4", 6: ">f8"}   # nc_type -> dtype big-endian
+
+
+def _parse_nc3_header(raw: bytes) -> dict:
+    """Cabeçalho do NetCDF-3: dimensões, atributos globais e, por variável, dims/atributos/tipo/offset."""
+    import struct
+    if raw[:3] != b"CDF" or raw[3:4] not in (b"\x01", b"\x02"):
+        raise ValueError(f"não é NetCDF-3 clássico (começa com {bytes(raw[:4])!r})")
+    off64 = raw[3:4] == b"\x02"
+    pos = 4
+
+    def u32():
+        nonlocal pos
+        v = struct.unpack_from(">I", raw, pos)[0]
+        pos += 4
+        return v
+
+    def u64():
+        nonlocal pos
+        v = struct.unpack_from(">Q", raw, pos)[0]
+        pos += 8
+        return v
+
+    def name():
+        nonlocal pos
+        n = u32()
+        s = bytes(raw[pos:pos + n]).decode("utf-8", "replace")
+        pos += (n + 3) & ~3                       # nomes são preenchidos até múltiplo de 4 bytes
+        return s
+
+    def attrs():
+        nonlocal pos
+        tag, n = u32(), u32()
+        if tag == 0 and n == 0:                   # lista ausente
+            return {}
+        if tag != 0x0C:
+            raise ValueError("lista de atributos inválida")
+        out = {}
+        for _ in range(n):
+            key, nctype, cnt = name(), u32(), u32()
+            dt = np.dtype(_NC3_DTYPES[nctype])
+            nbytes = cnt * dt.itemsize
+            chunk = bytes(raw[pos:pos + nbytes])
+            pos += (nbytes + 3) & ~3
+            out[key] = (chunk.decode("utf-8", "replace").rstrip("\x00") if nctype == 2
+                        else np.frombuffer(chunk, dtype=dt))
+        return out
+
+    u32()                                          # numrecs (só importa p/ variáveis de registro)
+    tag, n = u32(), u32()
+    dims = []
+    if not (tag == 0 and n == 0):
+        if tag != 0x0A:
+            raise ValueError("lista de dimensões inválida")
+        dims = [(name(), u32()) for _ in range(n)]
+    gatts = attrs()
+    tag, n = u32(), u32()
+    variables = {}
+    if not (tag == 0 and n == 0):
+        if tag != 0x0B:
+            raise ValueError("lista de variáveis inválida")
+        for _ in range(n):
+            vname = name()
+            dimids = [u32() for _ in range(u32())]
+            vatts = attrs()
+            nctype, _vsize = u32(), u32()
+            begin = u64() if off64 else u32()
+            variables[vname] = dict(dims=[dims[i] for i in dimids], attrs=vatts,
+                                    nctype=nctype, begin=begin)
+    return dict(dims=dims, gatts=gatts, vars=variables)
+
+
+def _nc3_read_var(raw: bytes, hdr: dict, vname: str) -> tuple:
+    """(array big-endian bruto, atributos) de uma variável NÃO-registro, como uma visão sobre os bytes."""
+    if vname not in hdr["vars"]:
+        raise KeyError(f"variável '{vname}' não existe no .nc (há: {list(hdr['vars'])})")
+    v = hdr["vars"][vname]
+    shape = tuple(length for _, length in v["dims"])
+    if any(length == 0 for length in shape):
+        raise NotImplementedError(f"'{vname}' tem dimensão ilimitada (variável de registro)")
+    count = int(np.prod(shape)) if shape else 1
+    arr = np.frombuffer(raw, dtype=np.dtype(_NC3_DTYPES[v["nctype"]]), count=count, offset=v["begin"])
+    return arr.reshape(shape), v["attrs"]
+
+
+def _nc3_decode(arr: np.ndarray, attrs: dict) -> np.ndarray:
+    """Decodificação CF no estilo do xarray: _Unsigned, _FillValue/missing_value -> NaN, scale_factor/add_offset."""
+    a = arr.astype(arr.dtype.newbyteorder("="))    # big-endian -> nativo (cópia independente dos bytes)
+    fills = [np.asarray(attrs[k]).ravel() for k in ("_FillValue", "missing_value") if k in attrs]
+    if a.dtype.kind == "i" and str(attrs.get("_Unsigned", "")).lower() == "true":
+        udt = np.dtype(f"u{a.dtype.itemsize}")
+        fills = [f.astype(a.dtype).view(udt) for f in fills]
+        a = a.view(udt)
+    mask = None
+    for f in fills:
+        for fv in f:
+            m = a == fv
+            mask = m if mask is None else (mask | m)
+    scale, offset = attrs.get("scale_factor"), attrs.get("add_offset")
+    if a.dtype.kind in "iu" and (mask is not None or scale is not None or offset is not None):
+        a = a.astype(np.float32 if a.dtype.itemsize <= 2 else np.float64)
+    if scale is not None:
+        a = a * np.asarray(scale).ravel()[0]
+    if offset is not None:
+        a = a + np.asarray(offset).ravel()[0]
+    if mask is not None:
+        a = np.where(mask, np.nan, a)
+    return a
+
+
+def _read_nc3_numpy(raw: bytes) -> tuple:
+    """(temp °C, lats, lons) a partir dos bytes de um NetCDF-3 -- mesma conta do _dataset_to_arrays."""
+    hdr = _parse_nc3_header(raw)
+
+    def get(vname):
+        arr, attrs = _nc3_read_var(raw, hdr, vname)
+        return _nc3_decode(arr, attrs)
+
+    lats = get("lat").astype("float32")
+    lons = get("lon").astype("float32")
+    temp = get("Band1").astype("float32") / 100.0 - np.float32(273.13)
     return temp, lats, lons
+
+
+_READER_NAME = None      # qual leitor decodificou o último frame (para o log)
+_READER_PRINTED = None
+
+
+def _read_nc_memory(raw: bytes) -> tuple:
+    """
+    1) NetCDF-3 (CDF1/CDF2): decodificado só com numpy. 2) Qualquer outro caso (NetCDF-4/HDF5, ou
+    recurso que o parser mínimo não cobre): leitores de biblioteca, ainda em memória.
+    """
+    global _READER_NAME
+    head = bytes(raw[:4])
+    if head[:3] == b"CDF" and head[3:4] in (b"\x01", b"\x02"):
+        try:
+            out = _read_nc3_numpy(raw)
+            _READER_NAME = "numpy (NetCDF-3, sem biblioteca)"
+            return out
+        except NotImplementedError:
+            pass   # ex.: variável de registro -> tenta as bibliotecas
+    try:
+        with _open_nc_memory(raw) as ds:
+            out = _dataset_to_arrays(ds)
+    except Exception as e:
+        if head == b"\x89HDF":
+            raise RuntimeError("o .nc é NetCDF-4/HDF5: não dá para ler só com numpy; precisa de netCDF4 "
+                               f"ou h5netcdf+h5py ({type(e).__name__}: {str(e)[:70]})") from e
+        raise
+    _READER_NAME = "biblioteca (xarray)"
+    return out
+
+
+def _log_reader_once():
+    global _READER_PRINTED
+    if _READER_NAME != _READER_PRINTED:
+        print(f"   leitor do .nc: {_READER_NAME}")
+        _READER_PRINTED = _READER_NAME
+
+
+_MEMORY_READ_OK = None   # None = ainda não testado; True/False depois do 1º frame
+
+
+def _read_goes(raw: bytes, nc_name: str) -> tuple:
+    """
+    Lê o frame a partir dos bytes (memória). Se GOES_IN_MEMORY = False, ou se o 1º frame mostrar
+    que nenhum leitor em memória funciona neste ambiente (e o disco funciona), cai para um arquivo
+    temporário em GOES_TMP_DIR (gravado, lido e apagado) -- o comportamento antigo.
+    """
+    global _MEMORY_READ_OK
+    mem_error = None
+    if GOES_IN_MEMORY and _MEMORY_READ_OK is not False:
+        try:
+            out = _read_nc_memory(raw)
+            _MEMORY_READ_OK = True
+            _log_reader_once()
+            return out
+        except Exception as e:
+            if _MEMORY_READ_OK:   # já funcionou antes: o problema é ESTE arquivo, não o leitor
+                raise
+            mem_error = e
+
+    GOES_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_nc = GOES_TMP_DIR / nc_name
+    try:
+        tmp_nc.write_bytes(raw)
+        out = _read_nc(tmp_nc)
+    finally:
+        try:
+            tmp_nc.unlink(missing_ok=True)
+        except Exception:
+            pass
+    if mem_error is not None:   # o disco leu o que a memória não leu -> o problema é o leitor, não o arquivo
+        _MEMORY_READ_OK = False
+        print(f"   [WARN] leitura em memória indisponível ({str(mem_error)[:140]}); "
+              f"seguindo com arquivo temporário em {GOES_TMP_DIR}")
+    return out
 
 
 # ── recorte espacial (ROI) ─────────────────────────────────────────────────
@@ -1004,9 +1260,12 @@ def plot_map_keogram(goes_dt, temp, lat, lon, mask_roi, frame_window, x_range, o
                 bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="0.6", alpha=0.9))
 
     _add_gridlines(ax)
-    ax.set_title(
-        rf"\textbf{{{goes_dt.strftime('%H:%M')} UTC - {goes_dt.strftime('%Y/%m/%d')} GOES Infrared (10.3 $\mu$m)}}"
-    )
+    title = (f"{goes_dt.strftime('%H:%M')} UTC - {goes_dt.strftime('%Y/%m/%d')} "
+             f"GOES Infrared (10.3 $\\mu$m)")
+    if mpl.rcParams["text.usetex"]:
+        ax.set_title(rf"\textbf{{{title}}}")
+    else:   # mathtext não entende \textbf: negrito pelo peso da fonte
+        ax.set_title(title, fontweight="bold")
 
     if n_keo:
         _draw_keogram_panels(fig, axes_keo, cax_keo, keo_panels, frame_window, x_range,
@@ -1134,14 +1393,15 @@ def _process_day(file_date, frame_time_range, target_time, sess):
         t_frame0 = time.perf_counter()
         tag = f"[{i_frame:>{len(str(n_frames))}}/{n_frames}] {goes_dt:%H:%M}"
 
-        nc_path = _download_nc(sess, urljoin(url, name), name)
-        if not nc_path:
+        raw = _download_nc_bytes(sess, urljoin(url, name), name)
+        if raw is None:
             n_err += 1
             print(f"  {tag} │ ✗ download")
             continue
 
         try:
-            temp, lat, lon = _read_nc(nc_path)
+            temp, lat, lon = _read_goes(raw, name)
+            raw = None   # temp/lat/lon são cópias: libera o .nc da memória já
             temp, lat, lon = _crop_to_roi(temp, lat, lon)
 
             doy      = goes_dt.timetuple().tm_yday
@@ -1195,11 +1455,7 @@ def _process_day(file_date, frame_time_range, target_time, sess):
             print(f"  {tag} │ ✗ {type(e).__name__}: {str(e)[:60]}")
 
         finally:
-            try:
-                if nc_path.exists():
-                    nc_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+            raw = None   # nada a apagar em disco; garante que os bytes do frame não ficam na memória
 
     print(f"{'─'*52}")
     print(f"  resumo: {n_frames} frames · {n_png} PNG · {_fmt_dur(time.perf_counter() - t_day0)} · "

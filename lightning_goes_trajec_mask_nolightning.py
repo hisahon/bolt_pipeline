@@ -95,6 +95,8 @@ GOES_IN_MEMORY    = True      # True = baixa o .nc do GOES para a memória e o d
 GOES_TMP_DIR      = r"data\goes_tmp"      # só usada com GOES_IN_MEMORY = False, ou como reserva se o .nc NÃO
                                           # for NetCDF-3 e nenhum leitor de biblioteca em memória funcionar
 OUT_DIR           = r"data\maps_keo"      # figuras: OUT_DIR/{YYYYMMDD}/*_MAPKEO.png
+SKIP_EXISTING     = True      # True = se o PNG do frame já existe em OUT_DIR, pula (nem baixa o GOES). False = refaz
+                              #        e sobrescreve tudo. Para refazer só alguns frames, apague os PNGs deles.
 CHANNEL           = 13
 GOES_TIMEOUT      = 30.0
 VMIN_TEMP         = -80       # °C
@@ -1276,8 +1278,14 @@ def plot_map_keogram(goes_dt, temp, lat, lon, mask_roi, frame_window, x_range, o
     add_provenance_footer(fig, storage_path=out_path.parent, x=0.46)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=130, bbox_inches="tight")
-    plt.close(fig)
+    # grava num nome temporário e só então renomeia: uma execução interrompida no meio do savefig não
+    # deixa um PNG pela metade que o SKIP_EXISTING trataria como figura pronta
+    tmp_path = out_path.with_name(out_path.stem + ".part.png")
+    try:
+        fig.savefig(tmp_path, dpi=130, bbox_inches="tight")
+    finally:
+        plt.close(fig)
+    os.replace(tmp_path, out_path)
     if LOG_VERBOSE:
         print(f"   Saved → {out_path.parent.name}/{out_path.name}")
     return out_path
@@ -1303,6 +1311,46 @@ def _fmt_dur(seconds: float) -> str:
     if s < 3600:
         return f"{s // 60} min {s % 60:02d} s"
     return f"{s // 3600} h {(s % 3600) // 60:02d} min"
+
+
+# ── helpers do laço de frames ────────────────────────────────────────────────
+def _out_path_for(file_date, goes_dt) -> Path:
+    """Caminho do PNG de um frame (o nome só depende do dia e do horário do frame)."""
+    doy = goes_dt.timetuple().tm_yday
+    out_name = (
+        f"{file_date.strftime('%Y%m%d')}_DOY{doy:03d}"
+        f"_{goes_dt.strftime('%H%M')}_CH{CHANNEL}_MAPKEO.png"
+    )
+    return OUT_DIR / file_date.strftime('%Y%m%d') / out_name
+
+
+def _figure_exists(out_path: Path) -> bool:
+    try:
+        return out_path.is_file() and out_path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _frame_mask(goes_dt) -> tuple:
+    """
+    Máscara de clusters do frame (None = nenhum cluster aprovado nesse horário). Devolve
+    (mask_full, mask_roi, ids_roi, n_all, n_act, mask_note): clusters na máscara / clusters que tocam o ROI.
+    """
+    mask_full, mask_roi = None, None
+    ids_roi = np.zeros(0, dtype=np.int32)
+    n_all = n_act = 0
+    mask_note = "sem máscara"
+    try:
+        mask_full = _load_cluster_mask(goes_dt)
+    except Exception as e:   # máscara ilegível não pode derrubar o mapa
+        mask_note = f"⚠ máscara: {type(e).__name__}: {str(e)[:40]}"
+        mask_full = None
+    if mask_full is not None:
+        mask_roi = _crop_mask_to_roi(mask_full)   # só sobram os clusters que tocam o ROI
+        ids_roi = np.unique(mask_roi["labels"][mask_roi["labels"] > 0])
+        n_all = len(np.unique(mask_full["labels"][mask_full["labels"] > 0]))
+        n_act = len(ids_roi)
+    return mask_full, mask_roi, ids_roi, n_all, n_act, mask_note
 
 
 # ── processamento de um dia ──────────────────────────────────────────────────
@@ -1369,7 +1417,7 @@ def _process_day(file_date, frame_time_range, target_time, sess):
     print(f"{'─'*52}")
     w_cl = 9
 
-    n_png = n_nomask = n_err = 0
+    n_png = n_nomask = n_err = n_skip = 0
 
     # janela de cada frame: epoch ± frame_half (meia-aberta [t0, t1), para frames vizinhos se emendarem)
     frame_half = timedelta(minutes=(FRAME_HALF_WINDOW_MIN if FRAME_HALF_WINDOW_MIN is not None
@@ -1379,6 +1427,12 @@ def _process_day(file_date, frame_time_range, target_time, sess):
     if frame_dts:
         # eixo x: do começo da janela do 1º frame ao fim da janela do último
         x_range = (pd.Timestamp(frame_dts[0] - frame_half), pd.Timestamp(frame_dts[-1] + frame_half))
+
+    # todas as figuras do dia já existem: não há o que fazer (nem carrega o keograma, que é a parte cara)
+    if SKIP_EXISTING and frame_dts and all(
+            _figure_exists(_out_path_for(file_date, d)) for d in frame_dts):
+        print(f"  ✓ as {len(frame_dts)} figuras já existem em {OUT_DIR / file_date.strftime('%Y%m%d')} -> nada a fazer")
+        return
 
     # keogramas de dTEC do dia: lidos UMA vez (só se os .nc já existirem; senão avisa como gerar)
     keo_panels = _load_keogram_panels(file_date, x_range)
@@ -1393,6 +1447,26 @@ def _process_day(file_date, frame_time_range, target_time, sess):
         t_frame0 = time.perf_counter()
         tag = f"[{i_frame:>{len(str(n_frames))}}/{n_frames}] {goes_dt:%H:%M}"
 
+        out_path = _out_path_for(file_date, goes_dt)
+        seg_t0 = pd.Timestamp(goes_dt - frame_half)
+        seg_t1 = pd.Timestamp(goes_dt + frame_half)
+
+        if SKIP_EXISTING and _figure_exists(out_path):
+            # figura pronta: não baixa o GOES nem plota. Mas o tracking é ACUMULATIVO, então os clusters
+            # deste frame entram no histórico (só a máscara, que é leve) -- as figuras seguintes saem
+            # iguais às de uma execução completa.
+            n_skip += 1
+            if keo_panels and KEO_MARK_STORMS:
+                try:
+                    m_full, _m_roi, m_ids = _frame_mask(goes_dt)[:3]
+                    if m_full is not None:
+                        storm_history.append(dict(t0=seg_t0, t1=seg_t1,
+                                                  clusters=_cluster_extents(m_full, only_ids=m_ids)))
+                except Exception:
+                    pass
+            print(f"  {tag} │ {'já existe':<{w_cl}} │ pulado")
+            continue
+
         raw = _download_nc_bytes(sess, urljoin(url, name), name)
         if raw is None:
             n_err += 1
@@ -1404,35 +1478,12 @@ def _process_day(file_date, frame_time_range, target_time, sess):
             raw = None   # temp/lat/lon são cópias: libera o .nc da memória já
             temp, lat, lon = _crop_to_roi(temp, lat, lon)
 
-            doy      = goes_dt.timetuple().tm_yday
-            out_name = (
-                f"{file_date.strftime('%Y%m%d')}_DOY{doy:03d}"
-                f"_{goes_dt.strftime('%H%M')}_CH{CHANNEL}_MAPKEO.png"
-            )
-            out_path = OUT_DIR / file_date.strftime('%Y%m%d') / out_name
-
-            seg_t0 = pd.Timestamp(goes_dt - frame_half)
-            seg_t1 = pd.Timestamp(goes_dt + frame_half)
-
             # ── máscara de clusters do frame (None = nenhum cluster aprovado nesse horário) ──
-            mask_full, mask_roi = None, None
-            ids_roi = np.zeros(0, dtype=np.int32)
-            n_all = n_act = 0   # clusters na máscara / clusters que tocam o ROI (os plotados)
-            mask_note = "sem máscara"
-            try:
-                mask_full = _load_cluster_mask(goes_dt)
-            except Exception as e:   # máscara ilegível não pode derrubar o mapa
-                mask_note = f"⚠ máscara: {type(e).__name__}: {str(e)[:40]}"
-                mask_full = None
+            mask_full, mask_roi, ids_roi, n_all, n_act, mask_note = _frame_mask(goes_dt)
             if mask_full is None:
                 n_nomask += 1
-            else:
-                mask_roi = _crop_mask_to_roi(mask_full)   # só sobram os clusters que tocam o ROI
-                ids_roi = np.unique(mask_roi["labels"][mask_roi["labels"] > 0])
-                n_all = len(np.unique(mask_full["labels"][mask_full["labels"] > 0]))
-                n_act = len(ids_roi)
-                if LOG_VERBOSE:
-                    print(f"      máscara: {mask_full['path'].name}")
+            elif LOG_VERBOSE:
+                print(f"      máscara: {mask_full['path'].name}")
 
             # ── tracking da tempestade (só depende da máscara, não de raios) ──
             cur_storm = None
@@ -1458,8 +1509,8 @@ def _process_day(file_date, frame_time_range, target_time, sess):
             raw = None   # nada a apagar em disco; garante que os bytes do frame não ficam na memória
 
     print(f"{'─'*52}")
-    print(f"  resumo: {n_frames} frames · {n_png} PNG · {_fmt_dur(time.perf_counter() - t_day0)} · "
-          f"{n_nomask} sem máscara · {n_err} erros")
+    print(f"  resumo: {n_frames} frames · {n_png} PNG novos · {n_skip} já existiam · "
+          f"{_fmt_dur(time.perf_counter() - t_day0)} · {n_nomask} sem máscara · {n_err} erros")
     print(f"  MAP+KEO → {OUT_DIR / file_date.strftime('%Y%m%d')}")
     if n_frames and n_nomask == n_frames:
         print("  ⚠ nenhuma máscara achada: confira MASK_DIR/MASK_NAME_PATTERNS "

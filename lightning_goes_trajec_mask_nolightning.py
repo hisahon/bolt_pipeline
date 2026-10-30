@@ -55,11 +55,11 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib as mpl
-mpl.rcParams["font.size"]       = 16
-mpl.rcParams["axes.titlesize"]  = 16
-mpl.rcParams["axes.labelsize"]  = 16
-mpl.rcParams["xtick.labelsize"] = 16
-mpl.rcParams["ytick.labelsize"] = 16
+mpl.rcParams["font.size"]       = 14
+mpl.rcParams["axes.titlesize"]  = 14
+mpl.rcParams["axes.labelsize"]  = 14
+mpl.rcParams["xtick.labelsize"] = 14
+mpl.rcParams["ytick.labelsize"] = 14
 
 mpl.rcParams["text.usetex"]  = USE_LATEX
 mpl.rcParams["font.family"]  = "serif"
@@ -94,7 +94,7 @@ GOES_IN_MEMORY    = True      # True = baixa o .nc do GOES para a memória e o d
                               #        por vez. False = grava em GOES_TMP_DIR, lê e apaga.
 GOES_TMP_DIR      = r"data\goes_tmp"      # só usada com GOES_IN_MEMORY = False, ou como reserva se o .nc NÃO
                                           # for NetCDF-3 e nenhum leitor de biblioteca em memória funcionar
-OUT_DIR           = r"data\maps_keo"      # figuras: OUT_DIR/{YYYYMMDD}/*_MAPKEO.png
+OUT_DIR           = r"data\maps_keo-nolightning"      # figuras: OUT_DIR/{YYYYMMDD}/*_MAPKEO.png
 SKIP_EXISTING     = True      # True = se o PNG do frame já existe em OUT_DIR, pula (nem baixa o GOES). False = refaz
                               #        e sobrescreve tudo. Para refazer só alguns frames, apague os PNGs deles.
 CHANNEL           = 13
@@ -126,18 +126,20 @@ TARGET_DATE       = "20231213"
 
 #Weak Thunderstorms:
 TARGET_DATE       = "20240803"
-TARGET_DATE       = "20240805"
-TARGET_DATE       = "20240811"
-TARGET_DATE       = "20240812"
-TARGET_DATE       = "20240813"
-TARGET_DATE       = "20240815"
-TARGET_DATE       = "20240816"
-TARGET_DATE       = "20240818"
-TARGET_DATE       = "20240819"
-TARGET_DATE       = "20240826"
-TARGET_DATE       = "20240828"
-TARGET_DATE       = "20240829"
+# TARGET_DATE       = "20240805"
+# TARGET_DATE       = "20240811"
+# TARGET_DATE       = "20240812"
+# TARGET_DATE       = "20240813"
+# TARGET_DATE       = "20240815"
+# TARGET_DATE       = "20240816"
+# TARGET_DATE       = "20240818"
+# TARGET_DATE       = "20240819"
+# TARGET_DATE       = "20240826"
+# TARGET_DATE       = "20240828"
+
+# TARGET_DATE       = "20240829"
 # TARGET_DATE       = "20240902"
+
 # TARGET_DATE       = "20240903"
 # TARGET_DATE       = "20240907"
 # TARGET_DATE       = "20240916"
@@ -146,6 +148,7 @@ TARGET_DATE       = "20240829"
 # TARGET_DATE       = "20260621"
 # TARGET_DATE       = "20260623"
 # TARGET_DATE       = "20260627"
+
 DATE_RANGE        = None                 # ex: ("20250110", "20250120")
 # TARGET_TIME : 'HHMM' -> só o frame GOES mais próximo desse horário, em cada dia. None = todos os frames.
 TARGET_TIME       = None                 # ex: "1230"
@@ -195,7 +198,7 @@ MASK_LABELS_KEYS = ("labels", "labels_filtered", "mask")
 
 # ── mapa: isoterma + id dos clusters ────────────────────────────────────────
 PLOT_ISOTHERM      = True
-PLOT_CLUSTER_IDS   = True
+PLOT_CLUSTER_IDS   = False    # True = número do cluster (círculo colorido) sobre cada cluster no mapa
 ISOTHERM_COLOR     = "lime"
 ISOTHERM_LINEWIDTH = 1.4
 CLUSTER_ID_LABEL_DLAT = 1.0   # deslocamento (graus de latitude, p/ cima) do número do cluster no mapa
